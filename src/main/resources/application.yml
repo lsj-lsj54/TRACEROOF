@@ -1,0 +1,138 @@
+server:
+  port: 8666
+  servlet:
+    context-path: /api
+    # 文件上传体积限制
+    # 两个都必须显式配置：max-file-size 管单个文件，max-request-size 管整个 multipart 请求体。
+    # 只配 max-file-size 时，multipart 解析仍会被请求体上限拦下，
+    # 表现为「超过 1MB 的文件上传必失败」，且错误信息被包装成笼统的系统错误，很难排查。
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+  tomcat:
+    # 请求被拒绝时允许吞掉的字节数，避免大文件失败后连接被直接断开
+    max-swallow-size: 20MB
+
+spring:
+  profiles:
+    active: local
+  application:
+    name: yu-evidence-backend
+  # Redis：本地缓存之外的一级分布式缓存
+  # 没有启动 Redis 时，/evidence/list/page/vo/cache 会报连接失败（其它接口不受影响）
+  redis:
+    host: localhost
+    port: 6379
+    # 本地没起 Redis 时不要卡住请求，快速失败
+    timeout: 2000ms
+    connect-timeout: 2000ms
+    lettuce:
+      shutdown-timeout: 100ms
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/evidence?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+    # 账号密码不写死在仓库里：
+    #   - 本地开发放在 application-local.yml（已 gitignore）
+    #   - 部署时用环境变量 SPRING_DATASOURCE_USERNAME / SPRING_DATASOURCE_PASSWORD（见 deploy/docker-compose.yml）
+    username: ${MYSQL_USERNAME:root}
+    password: ${MYSQL_PASSWORD:}
+  # ==================== 分表（ShardingSphere 5.2.0）====================
+  # 只把 evidence 表按 archiveId 拆分，且**只对团队档案库分表**；私有档案库和公共案例库共用原表 evidence。
+  # archive / archive_user / user 三张表保持单表，走同一个数据源。
+  #
+  # 注意：这个 starter 一旦在 classpath 上，它提供的 DataSource 会取代 spring.datasource 成为唯一数据源，
+  # 所以 url / 账号密码必须在这里配全。下面直接用 ${spring.datasource.xxx} 引用上面那三行，
+  # 这样 application-local.yml 的本地密码、以及部署时的环境变量注入都继续生效，不用维护两份。
+  shardingsphere:
+    datasource:
+      names: evidence
+      evidence:
+        type: com.zaxxer.hikari.HikariDataSource
+        driver-class-name: ${spring.datasource.driver-class-name}
+        url: ${spring.datasource.url}
+        username: ${spring.datasource.username}
+        password: ${spring.datasource.password}
+    rules:
+      sharding:
+        tables:
+          # 这里写的是**启动时的初始值**，运行后会被 DynamicShardingManager 覆盖：
+          # 它把所有未删除团队档案库拼成 evidence.evidence_<id>,...,evidence.evidence
+          # 再调 alterRuleConfiguration 写回 ShardingSphere。
+          #
+          # 不要把真实表在这里写死成 $->{0..1} 之类的枚举：本项目的分表是
+          # 「一个档案库一张表」（evidence_<archiveId>），表在档案库创建时才建，数量不固定。
+          evidence:
+            actual-data-nodes: evidence.evidence
+            table-strategy:
+              standard:
+                sharding-column: archiveId
+                sharding-algorithm-name: evidence_sharding_algorithm
+        sharding-algorithms:
+          evidence_sharding_algorithm:
+            type: CLASS_BASED
+            props:
+              # 这两个 key 必须写成驼峰。5.2.0 的 ClassBasedShardingAlgorithm 是直接按字面量
+              # 取 "strategy" 和 "algorithmClassName"，写成 algorithm-class-name 会报
+              # "Properties `algorithmClassName` can not be null"
+              strategy: standard
+              algorithmClassName: com.traceproof.manager.sharding.EvidenceShardingAlgorithm
+    # sql-show 是全局属性，必须放在 rules 外面；
+    # 写在 rules.sharding.props 下不会生效（那里是分片规则自己的属性）。
+    props:
+      sql-show: true
+# Sa-Token 配置
+# 登录态改用 Sa-Token 管理：登录后 token 写入 Cookie（satoken），前端沿用 credentials: 'include'，
+# 无需改动前端即可维持登录态。会话数据存 Redis（sa-token-redis-jackson）。
+sa-token:
+  # token 名称（同时也是 Cookie 名与请求头名）
+  token-name: satoken
+  # token 有效期（秒），默认 30 天
+  timeout: 2592000
+  # token 最低活跃频率（秒），-1 表示不限制
+  active-timeout: -1
+  # 是否允许同一账号多地同时登录
+  is-concurrent: true
+  # 多人登录共享一个 token / 各自独立 token
+  is-share: true
+  # token 风格：uuid
+  token-style: uuid
+  # 是否输出操作日志
+  is-log: false
+  # 是否从 Cookie 中读取 token（前端 credentials: include 携带）
+  is-read-cookie: true
+  # 是否在登录成功后把 token 写入 Cookie 返回给前端
+  is-write-cookie: true
+  # Cookie 安全属性
+  # 注意：Sa-Token 的 SaCookieConfig 默认 httpOnly=false，意味着 document.cookie 能直接读到
+  # satoken，一次 XSS 就能把这份 30 天有效的登录态抄走。前端只用 credentials: 'include'
+  # 携带 Cookie、不靠 JS 读取，所以开启它没有任何副作用。
+  cookie:
+    http-only: true
+    # 本地是 HTTP，开启 secure 会导致浏览器不回传 Cookie；生产 HTTPS 用环境变量覆盖为 true
+    secure: ${SA_TOKEN_COOKIE_SECURE:false}
+  # 关闭 Sa-Token 默认的同源校验（跨域场景由 CorsConfig 统一处理）
+  is-check-same-token: false
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: false
+    # 仅在开发环境开启日志
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      logic-delete-field: isDelete # 全局逻辑删除的实体字段名
+      logic-delete-value: 1 # 逻辑已删除值（默认为 1）
+      logic-not-delete-value: 0 # 逻辑未删除值（默认为 0）
+    enable-sql-runner: true
+# 接口文档配置
+knife4j:
+  enable: true
+  openapi:
+    title: "接口文档"
+    version: 1.0
+    group:
+      default:
+        api-rule: package
+        api-rule-resources:
+          - com.traceproof.controller
+

@@ -1,0 +1,33 @@
+# 构建上下文排除清单
+#
+# 两个作用：
+#   1. 瘦身上下文：target/ 里有 60MB+ 的 jar，.git/ 也可能很大，
+#      不排除的话每次 docker build 都要先把它们打包发给 daemon，白白变慢。
+#   2. 【安全】防止密钥进镜像：src/main/resources/application-local.yml 存的是
+#      真实的数据库密码和腾讯云密钥（已被 .gitignore 排除，不在仓库里），
+#      但如果在你本机执行 docker build，它会被 COPY src 带进镜像层。
+#      镜像层删不干净，等于密钥永久留在镜像里。
+
+# --- 版本控制与 IDE ---
+.git
+.gitignore
+.idea
+.vscode
+*.iml
+HELP.md
+
+# --- 构建产物 ---
+target/
+**/target/
+
+# --- 密钥与本地配置（最关键的两条）---
+**/application-local.yml
+.env
+deploy/.env
+**/*.pem
+**/*.key
+
+# --- 文档与前端本地测试脚本：镜像里用不到 ---
+docs/
+*.md
+front/*.mjs

@@ -1,0 +1,62 @@
+{
+  "permissions": [
+    {
+      "key": "archiveUser:manage",
+      "name": "成员管理",
+      "description": "管理档案库成员，添加或移除成员"
+    },
+    {
+      "key": "evidence:view",
+      "name": "查看影像",
+      "description": "查看档案库中的影像内容"
+    },
+    {
+      "key": "evidence:upload",
+      "name": "上传影像",
+      "description": "上传影像到档案库中"
+    },
+    {
+      "key": "evidence:edit",
+      "name": "修改影像",
+      "description": "编辑已上传的影像信息"
+    },
+    {
+      "key": "evidence:delete",
+      "name": "删除影像",
+      "description": "删除档案库中的影像"
+    }
+  ],
+  "roles": [
+    {
+      "key": "viewer",
+      "name": "浏览者",
+      "permissions": [
+        "evidence:view"
+      ],
+      "description": "查看影像"
+    },
+    {
+      "key": "editor",
+      "name": "编辑者",
+      "permissions": [
+        "evidence:view",
+        "evidence:upload",
+        "evidence:edit",
+        "evidence:delete"
+      ],
+      "description": "查看影像、上传影像、修改影像、删除影像"
+    },
+    {
+      "key": "admin",
+      "name": "管理员",
+      "permissions": [
+        "archiveUser:manage",
+        "evidence:view",
+        "evidence:upload",
+        "evidence:edit",
+        "evidence:delete"
+      ],
+      "description": "成员管理、查看影像、上传影像、修改影像、删除影像"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+# 前端镜像：Nginx 托管静态文件 + 反向代理 /api 到后端
+FROM nginx:1.27-alpine
+
+# 站点配置与静态文件
+COPY deploy/nginx/default.conf /etc/nginx/conf.d/default.conf
+COPY front/ /usr/share/nginx/html/
+
+# 去掉本地开发用的辅助脚本，不带到服务器上
+RUN rm -f /usr/share/nginx/html/smoke-test.mjs \
+          /usr/share/nginx/html/e2e-test.mjs \
+          /usr/share/nginx/html/mock-backend.mjs \
+          /usr/share/nginx/html/url-upload-test.mjs \
+          /usr/share/nginx/html/README.md
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

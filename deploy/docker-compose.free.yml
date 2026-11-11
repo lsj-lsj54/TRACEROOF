@@ -1,0 +1,119 @@
+# 低配 / 免 Redis 部署：MySQL + 后端 + 前端
+#
+# 用途：免费云主机通常只有 1~2GB 内存，跑不起「MySQL + Redis + JVM」三件套。
+# 这份编排做了三件事把内存压下来：
+#   1. 去掉 Redis —— 本项目对 Redis 是「可选依赖」：
+#      只有 /evidence/list/page/vo/cache 接口用它，其余接口不受影响。
+#      前端改走不带缓存的接口（Nginx 用 default.no-cache.conf），功能完全一致，只是少一层缓存。
+#   2. 压 MySQL —— buffer pool 256M → 96M，关掉 performance_schema（小机器上能省 100MB+）。
+#   3. 收紧 JVM —— 固定 512M 堆 + 限制 Metaarchive + SerialGC，避免在 1GB 机器上被 OOM Kill。
+#
+# 用法（注意用的是这个文件，不是 docker-compose.yml）：
+#   cp deploy/.env.example deploy/.env && vi deploy/.env
+#   docker compose --env-file deploy/.env -f deploy/docker-compose.free.yml up -d --build
+#
+# 内存参考：MySQL ≈ 250MB、JVM ≈ 600MB、Nginx ≈ 10MB。
+#   2GB 机器：舒服
+#   1GB 机器：紧张 → 建议先加 1~2GB swap（见 docs/deploy-free.md）
+#   512MB 容器：跑不动，请参考 docs/deploy-free.md 的「方案 B」把后端放到别处
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: evidence-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: evidence
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # 小机器上最省内存的两条
+      - --innodb-buffer-pool-size=96M
+      - --performance-schema=OFF
+      - --max-connections=40
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks: [app-net]
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: evidence-app:${EVIDENCE_TAG:-latest}
+    container_name: evidence-app
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/evidence?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USERNAME:-root}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD}
+      # 本编排不含 Redis。这里显式指向不存在的地址并缩短超时，
+      # 万一有人误开了缓存开关，也只是这个接口不可用，不会拖慢其它请求。
+      SPRING_REDIS_HOST: 127.0.0.1
+      SPRING_REDIS_PORT: 6379
+      SPRING_REDIS_TIMEOUT: 500ms
+      SPRING_REDIS_CONNECT_TIMEOUT: 500ms
+      COS_CLIENT_HOST: ${COS_HOST}
+      COS_CLIENT_SECRET_ID: ${COS_SECRET_ID}
+      COS_CLIENT_SECRET_KEY: ${COS_SECRET_KEY}
+      COS_CLIENT_REGION: ${COS_REGION}
+      COS_CLIENT_BUCKET: ${COS_BUCKET}
+      APP_CORS_ALLOWED_ORIGIN_PATTERNS: ${CORS_ALLOWED_ORIGIN_PATTERNS:-*}
+      MYBATIS_PLUS_CONFIGURATION_LOG_IMPL: org.apache.ibatis.logging.nologging.NoLoggingImpl
+      # 固定堆大小而不是按比例：按比例在 12GB 的机器上会算出 7GB 的最大堆，
+      # 白白让 JVM 敢往上涨；小机器上写死更好预测。
+      JAVA_OPTS: "-Xms128m -Xmx512m -XX:MaxMetaarchiveSize=192m -XX:+UseSerialGC -Dfile.encoding=UTF-8 -XX:+ExitOnOutOfMemoryError"
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks: [app-net]
+
+  front:
+    build:
+      context: ..
+      dockerfile: Dockerfile.front
+    image: evidence-front:${EVIDENCE_TAG:-latest}
+    container_name: evidence-front
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      # 关键：用不打开缓存开关的配置（本编排没有 Redis）
+      - ./nginx/default.no-cache.conf:/etc/nginx/conf.d/default.conf:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks: [app-net]
+
+volumes:
+  mysql-data:
+
+networks:
+  app-net:
+    driver: bridge

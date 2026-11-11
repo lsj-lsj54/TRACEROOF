@@ -1,0 +1,148 @@
+# 证链·物流异常件影像取证平台一键部署：MySQL + Redis + 后端 + 前端(Nginx)
+#
+# 使用方式（推荐直接用封装好的脚本）：
+#   cp deploy/.env.example deploy/.env   # 填 MySQL 密码与腾讯云 COS 密钥
+#   bash deploy/deploy.sh               # 构建 + 启动 + 健康检查（失败自动回滚）
+#
+# 手动方式：
+#   docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --build
+#
+# 说明：
+#   - Compose 按依赖顺序启动，app 会等 mysql / redis 健康检查通过。
+#   - 端口、镜像标签都可用 .env 里的 HTTP_PORT / EVIDENCE_TAG 覆盖。
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: evidence-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: evidence
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # 小内存机器上别让 MySQL 抢太多内存
+      - --innodb-buffer-pool-size=256M
+      - --max-connections=100
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 仅在数据卷为空（首次启动）时执行；脚本写成可重复执行的
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      # 密码走容器内已有的环境变量，不写在命令里（避免出现在 docker inspect 的 Cmd）
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    # 给 InnoDB 留出干净关闭的时间，别被 SIGKILL 掉
+    stop_grace_period: 30s
+    # 限制日志体积，40GB 小盘最怕被容器日志撑满
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [app-net]
+
+  redis:
+    image: redis:7-alpine
+    container_name: evidence-redis
+    restart: unless-stopped
+    # 只在内网暴露，不映射到宿主机，避免被扫到
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [app-net]
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # 按 git SHA 打标签，不用 latest：出问题能明确知道线上跑的是哪个提交，也方便回滚
+    image: evidence-app:${EVIDENCE_TAG:-latest}
+    container_name: evidence-app
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      # 容器里没有 application-local.yml，配置全部由环境变量注入。
+      # 环境变量的优先级高于 application.yml，因此这里能覆盖掉 yml 里的默认值。
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/evidence?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      # 应用连库用的账号密码（默认 root；可换成最小权限的应用账号）
+      # 不用 ${MYSQL_APP_PASSWORD:-${MYSQL_ROOT_PASSWORD}} 这种嵌套默认值：
+      # 各版本 compose 对嵌套插值的行为不一致，一旦不生效就是线上起不来。
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USERNAME:-root}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD}
+      # Redis（多级缓存的分布式那一级）
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      # 腾讯云 COS：密钥必须从环境变量注入，不要提交到仓库
+      COS_CLIENT_HOST: ${COS_HOST}
+      COS_CLIENT_SECRET_ID: ${COS_SECRET_ID}
+      COS_CLIENT_SECRET_KEY: ${COS_SECRET_KEY}
+      COS_CLIENT_REGION: ${COS_REGION}
+      COS_CLIENT_BUCKET: ${COS_BUCKET}
+      # 允许跨域的来源：默认 *（方便调试）。生产建议收紧成自己的域名，
+      # 例如 CORS_ALLOWED_ORIGIN_PATTERNS=https://evidence.example.com
+      APP_CORS_ALLOWED_ORIGIN_PATTERNS: ${CORS_ALLOWED_ORIGIN_PATTERNS:-*}
+      # 生产关掉 MyBatis 的 SQL 明文日志，日志量和信息泄露都更可控
+      MYBATIS_PLUS_CONFIGURATION_LOG_IMPL: org.apache.ibatis.logging.nologging.NoLoggingImpl
+      JAVA_OPTS: "-XX:MaxRAMPercentage=70 -XX:+UseG1GC -Dfile.encoding=UTF-8"
+    # 不映射端口到宿主机：只允许经 Nginx 访问，减少暴露面。
+    # 需要直接从外面调接口时再打开下面注释：
+    # ports:
+    #   - "8666:8666"
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [app-net]
+
+  front:
+    build:
+      context: ..
+      dockerfile: Dockerfile.front
+    image: evidence-front:${EVIDENCE_TAG:-latest}
+    container_name: evidence-front
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      # 没备案的大陆机器 80 端口会被拦，此时在 .env 里把 HTTP_PORT 改成 8080 这类非标端口
+      - "${HTTP_PORT:-80}:80"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [app-net]
+
+volumes:
+  mysql-data:
+  redis-data:
+
+networks:
+  app-net:
+    driver: bridge
