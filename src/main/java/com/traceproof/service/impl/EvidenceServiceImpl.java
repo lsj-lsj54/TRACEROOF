@@ -81,6 +81,15 @@ public class EvidenceServiceImpl extends ServiceImpl<EvidenceMapper, Evidence>
      */
     private static final int MAX_BATCH_COUNT = 30;
 
+    private static final Set<String> SORT_FIELDS = Set.of(
+            "id", "url", "thumbnailUrl", "name", "introduction", "category", "tags",
+            "picSize", "picWidth", "picHeight", "picScale", "picFormat", "userId",
+            "reviewStatus", "reviewMessage", "reviewerId", "reviewTime", "archiveId",
+            "picColor", "picColorR", "picColorG", "picColorB",
+            "createTime", "editTime", "updateTime");
+
+    private static final Set<String> SORT_ORDERS = Set.of("ascend", "descend");
+
     /**
      * 按主色调查询时的默认颜色距离阈值（0~441，值越大返回的颜色范围越宽）。
      * 含义：与目标颜色欧氏距离 <= 该值的影像才会被返回，并按距离升序排列。
@@ -402,6 +411,11 @@ public class EvidenceServiceImpl extends ServiceImpl<EvidenceMapper, Evidence>
         Long reviewerId = evidenceQueryRequest.getReviewerId();
         Long archiveId = evidenceQueryRequest.getArchiveId();
 
+        ThrowUtils.throwIf(StrUtil.isNotBlank(sortField) && !SORT_FIELDS.contains(sortField),
+                ErrorCode.PARAMS_ERROR, "排序字段不合法");
+        ThrowUtils.throwIf(StrUtil.isNotBlank(sortOrder) && !SORT_ORDERS.contains(sortOrder),
+                ErrorCode.PARAMS_ERROR, "排序方向不合法");
+
         // 按主色调（腾讯云 imageAve 返回）查询：解析目标颜色，准备颜色距离筛选与排序
         String picColor = evidenceQueryRequest.getPicColor();
         Integer colorDistance = evidenceQueryRequest.getColorDistance();
@@ -495,6 +509,15 @@ public class EvidenceServiceImpl extends ServiceImpl<EvidenceMapper, Evidence>
         ThrowUtils.throwIf(evidence == null, ErrorCode.PARAMS_ERROR, "影像不能为空");
         Long archiveId = evidence.getArchiveId();
         if (archiveId == null || archiveId == 0) {
+            if (evidence.getReviewStatus() != null
+                    && evidence.getReviewStatus() == EvidenceReviewStatusEnum.PASS.getValue()) {
+                return;
+            }
+            User loginUser = userService.getLoginUserOrNull(request);
+            boolean owner = loginUser != null && loginUser.getId() != null
+                    && loginUser.getId().equals(evidence.getUserId());
+            ThrowUtils.throwIf(!owner && !userService.isAdmin(loginUser),
+                    ErrorCode.NO_AUTH_ERROR, "影像尚未审核通过");
             return;
         }
         Archive archive = archiveService.getById(archiveId);
@@ -520,6 +543,8 @@ public class EvidenceServiceImpl extends ServiceImpl<EvidenceMapper, Evidence>
         ThrowUtils.throwIf(evidenceQueryRequest == null, ErrorCode.PARAMS_ERROR);
         long current = evidenceQueryRequest.getCurrent();
         long size = evidenceQueryRequest.getPageSize();
+        ThrowUtils.throwIf(current < 1, ErrorCode.PARAMS_ERROR, "页码必须大于 0");
+        ThrowUtils.throwIf(size < 1, ErrorCode.PARAMS_ERROR, "每页数量必须大于 0");
         // 限制爬虫
         ThrowUtils.throwIf(size > 20, ErrorCode.PARAMS_ERROR, "每页最多 20 条");
         Long archiveId = evidenceQueryRequest.getArchiveId();
@@ -636,11 +661,13 @@ public class EvidenceServiceImpl extends ServiceImpl<EvidenceMapper, Evidence>
      */
     @Override
     public void fillReviewParams(Evidence evidence, User loginUser) {
-        if (userService.isAdmin(loginUser)||evidence.getArchiveId()!=null) {
-            // 管理员或者私人档案库自动过审
+        boolean archiveEvidence = evidence.getArchiveId() != null && evidence.getArchiveId() > 0;
+        boolean admin = userService.isAdmin(loginUser);
+        if (admin || archiveEvidence) {
+            // 管理员或者私人/团队档案库自动过审，公共案例库仍需审核
             evidence.setReviewStatus(EvidenceReviewStatusEnum.PASS.getValue());
             evidence.setReviewerId(loginUser.getId());
-            evidence.setReviewMessage("管理员自动过审");
+            evidence.setReviewMessage(admin ? "管理员自动过审" : "档案库影像无需公共审核");
             evidence.setReviewTime(new Date());
         } else {
             // 非管理员，创建或编辑都要改为待审核
@@ -816,8 +843,8 @@ public class EvidenceServiceImpl extends ServiceImpl<EvidenceMapper, Evidence>
      * 只用来挡住热点查询，真正的跨实例缓存在 Redis。
      */
     private final Cache<String, String> LOCAL_CACHE =
-            Caffeine.newBuilder().initialCapacity(1024)
-                    .maximumSize(10000L)
+            Caffeine.newBuilder().initialCapacity(128)
+                    .maximumSize(500L)
                     // 本地缓存比 Redis 稍短，让两级缓存自然错开，避免同时失效
                     .expireAfterWrite(5L, TimeUnit.MINUTES)
                     .build();
@@ -847,6 +874,8 @@ public class EvidenceServiceImpl extends ServiceImpl<EvidenceMapper, Evidence>
         evidenceQueryRequest.setArchiveId(0L);
         long current = evidenceQueryRequest.getCurrent();
         long size = evidenceQueryRequest.getPageSize();
+        ThrowUtils.throwIf(current < 1, ErrorCode.PARAMS_ERROR, "页码必须大于 0");
+        ThrowUtils.throwIf(size < 1, ErrorCode.PARAMS_ERROR, "每页数量必须大于 0");
         // 限制爬虫
         ThrowUtils.throwIf(size > 20, ErrorCode.PARAMS_ERROR, "每页最多 20 条");
         // 普通用户默认只能查看已过审的数据
@@ -907,38 +936,22 @@ public class EvidenceServiceImpl extends ServiceImpl<EvidenceMapper, Evidence>
     /**
      * 拼装参与缓存的查询条件
      * <p>
-     * 不用 JSON 序列化整个请求对象：字段顺序、null 处理稍有变化就会导致 key 变化，
-     * 明明是同一次查询却缓存不命中。这里显式列出真正影响结果的字段。
+     * 在副本上规范化后序列化整个 DTO，避免新增查询字段时漏进缓存 key。
+     * 标签排序不影响原请求，排序方向统一小写，保证等价查询使用同一个 key。
      *
      * @param queryRequest 查询请求
      * @return 用于计算 md5 的条件串
      */
     private String buildCacheCondition(EvidenceQueryRequest queryRequest) {
-        StringBuilder sb = new StringBuilder(128);
-        sb.append("current=").append(queryRequest.getCurrent())
-                .append("&size=").append(queryRequest.getPageSize())
-                .append("&reviewStatus=").append(queryRequest.getReviewStatus())
-                .append("&searchText=").append(StrUtil.nullToEmpty(queryRequest.getSearchText()))
-                .append("&category=").append(StrUtil.nullToEmpty(queryRequest.getCategory()))
-                .append("&picFormat=").append(StrUtil.nullToEmpty(queryRequest.getPicFormat()))
-                .append("&userId=").append(queryRequest.getUserId())
-                // 缓存只用于公共案例库（archiveId 恒为 0），这里列出来是为了条件串与查询语义保持一致
-                .append("&archiveId=").append(queryRequest.getArchiveId())
-                .append("&name=").append(StrUtil.nullToEmpty(queryRequest.getName()))
-                .append("&introduction=").append(StrUtil.nullToEmpty(queryRequest.getIntroduction()))
-                .append("&sortField=").append(StrUtil.nullToEmpty(queryRequest.getSortField()))
-                // 统一成小写再比较，避免 "ASC" 与 "asc" 生成两个 key
-                .append("&sortOrder=").append(StrUtil.nullToEmpty(queryRequest.getSortOrder()).toLowerCase())
-                // 按颜色查图：颜色与阈值必须进入缓存键，否则不同颜色会命中同一份缓存
-                .append("&picColor=").append(StrUtil.nullToEmpty(queryRequest.getPicColor()))
-                .append("&colorDistance=").append(queryRequest.getColorDistance());
+        EvidenceQueryRequest normalizedRequest = new EvidenceQueryRequest();
+        BeanUtils.copyProperties(queryRequest, normalizedRequest);
         if (CollUtil.isNotEmpty(queryRequest.getTags())) {
-            // 标签按字典序排序，顺序不同不应视作不同查询
-            sb.append("&tags=").append(queryRequest.getTags().stream()
+            normalizedRequest.setTags(queryRequest.getTags().stream()
                     .sorted()
-                    .collect(Collectors.joining(",")));
+                    .collect(Collectors.toList()));
         }
-        return sb.toString();
+        normalizedRequest.setSortOrder(StrUtil.nullToEmpty(queryRequest.getSortOrder()).toLowerCase());
+        return JSONUtil.toJsonStr(normalizedRequest);
     }
 
     /**
@@ -1024,8 +1037,8 @@ public class EvidenceServiceImpl extends ServiceImpl<EvidenceMapper, Evidence>
         long count = this.lambdaQuery()
                 .eq(Evidence::getUrl, evidenceUrl)
                 .count();
-        // 有不止一条记录用到了该影像，不清理
-        if (count > 1) {
+        // 删除记录后仍有其他记录引用该影像，不清理
+        if (count > 0) {
             log.info("该影像仍被 {} 条记录引用，跳过对象存储清理: {}", count, evidenceUrl);
             return;
         }

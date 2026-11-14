@@ -1,5 +1,6 @@
 package com.traceproof.service.impl;
 
+import com.baomidou.mybatisplus.extension.conditions.query.LambdaQueryChainWrapper;
 import com.traceproof.exception.BusinessException;
 import com.traceproof.manager.CosManager;
 import com.traceproof.model.entity.Evidence;
@@ -16,6 +17,7 @@ import java.lang.reflect.Field;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -58,6 +60,16 @@ class EvidenceDeleteTest {
         if (archiveService != null) {
             setField(service, "archiveService", archiveService);
         }
+        return service;
+    }
+
+    private EvidenceServiceImpl buildCleanupService(long referenceCount, CosManager cosManager) throws Exception {
+        EvidenceServiceImpl service = spy(new EvidenceServiceImpl());
+        LambdaQueryChainWrapper<Evidence> queryWrapper = mock(LambdaQueryChainWrapper.class);
+        doReturn(queryWrapper).when(service).lambdaQuery();
+        doReturn(queryWrapper).when(queryWrapper).eq(any(), any());
+        doReturn(referenceCount).when(queryWrapper).count();
+        setField(service, "cosManager", cosManager);
         return service;
     }
 
@@ -205,5 +217,29 @@ class EvidenceDeleteTest {
         service.deleteEvidence(100L, user(OWNER_ID));
 
         verify(archiveService, never()).updateArchiveUsage(any(), anyLong(), anyLong());
+    }
+
+    @Test
+    @DisplayName("删除记录后仍有一条引用时不能删除 COS 对象")
+    void shouldKeepCosObjectWhenOneReferenceRemains() throws Exception {
+        CosManager cosManager = mock(CosManager.class);
+        EvidenceServiceImpl service = buildCleanupService(1L, cosManager);
+
+        service.clearEvidenceFile(evidence(100L));
+
+        verify(cosManager, never()).deleteObjectByUrl(anyString());
+    }
+
+    @Test
+    @DisplayName("删除记录后没有引用时才删除原图和缩略图")
+    void shouldDeleteCosObjectsWhenNoReferenceRemains() throws Exception {
+        CosManager cosManager = mock(CosManager.class);
+        EvidenceServiceImpl service = buildCleanupService(0L, cosManager);
+        Evidence oldEvidence = evidence(100L);
+
+        service.clearEvidenceFile(oldEvidence);
+
+        verify(cosManager).deleteObjectByUrl(oldEvidence.getUrl());
+        verify(cosManager).deleteObjectByUrl(oldEvidence.getThumbnailUrl());
     }
 }

@@ -24,7 +24,8 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       # 小内存机器上别让 MySQL 抢太多内存
-      - --innodb-buffer-pool-size=256M
+      - --innodb-buffer-pool-size=128M
+      - --performance-schema=OFF
       - --max-connections=100
     volumes:
       - mysql-data:/var/lib/mysql
@@ -52,7 +53,7 @@ services:
     container_name: evidence-redis
     restart: unless-stopped
     # 只在内网暴露，不映射到宿主机，避免被扫到
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}", "--maxmemory", "192mb"]
     volumes:
       - redis-data:/data
     healthcheck:
@@ -107,7 +108,7 @@ services:
       APP_CORS_ALLOWED_ORIGIN_PATTERNS: ${CORS_ALLOWED_ORIGIN_PATTERNS:-*}
       # 生产关掉 MyBatis 的 SQL 明文日志，日志量和信息泄露都更可控
       MYBATIS_PLUS_CONFIGURATION_LOG_IMPL: org.apache.ibatis.logging.nologging.NoLoggingImpl
-      JAVA_OPTS: "-XX:MaxRAMPercentage=70 -XX:+UseG1GC -Dfile.encoding=UTF-8"
+      JAVA_OPTS: "-Xms128m -Xmx512m -XX:MaxMetaspaceSize=256m -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8"
     # 不映射端口到宿主机：只允许经 Nginx 访问，减少暴露面。
     # 需要直接从外面调接口时再打开下面注释：
     # ports:

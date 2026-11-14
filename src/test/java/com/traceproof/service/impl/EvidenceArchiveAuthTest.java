@@ -108,6 +108,7 @@ class EvidenceArchiveAuthTest {
         evidence.setUserId(userId);
         evidence.setArchiveId(archiveId);
         evidence.setUrl("https://example.com/a.jpg");
+        evidence.setReviewStatus(EvidenceReviewStatusEnum.PASS.getValue());
         return evidence;
     }
 
@@ -123,6 +124,53 @@ class EvidenceArchiveAuthTest {
         EvidenceVO evidenceVO = service.getEvidenceVO(evidence(100L, OTHER_ID, null), null);
 
         assertNotNull(evidenceVO, "公共案例库必须允许未登录浏览");
+    }
+
+    @Test
+    @DisplayName("公共待审核影像对未登录和其他用户不可见")
+    void pendingPublicEvidenceShouldBeHiddenFromAnonymousAndOthers() throws Exception {
+        EvidenceServiceImpl service = newService();
+        Evidence pending = evidence(100L, OWNER_ID, 0L);
+        pending.setReviewStatus(EvidenceReviewStatusEnum.REVIEWING.getValue());
+        when(userService.getLoginUserOrNull(null)).thenReturn(null, user(OTHER_ID));
+
+        assertThrows(BusinessException.class, () -> service.getEvidenceVO(pending, null));
+        assertThrows(BusinessException.class, () -> service.getEvidenceVO(pending, null));
+    }
+
+    @Test
+    @DisplayName("公共影像审核状态为空时不能向匿名用户开放")
+    void nullReviewStatusPublicEvidenceShouldBeHidden() throws Exception {
+        EvidenceServiceImpl service = newService();
+        Evidence pending = evidence(100L, OWNER_ID, null);
+        pending.setReviewStatus(null);
+        when(userService.getLoginUserOrNull(null)).thenReturn(null);
+
+        assertThrows(BusinessException.class, () -> service.getEvidenceVO(pending, null));
+    }
+
+    @Test
+    @DisplayName("公共待审核影像允许上传者本人查看")
+    void pendingPublicEvidenceShouldBeVisibleToOwner() throws Exception {
+        EvidenceServiceImpl service = newService();
+        Evidence pending = evidence(100L, OWNER_ID, 0L);
+        pending.setReviewStatus(EvidenceReviewStatusEnum.REVIEWING.getValue());
+        when(userService.getLoginUserOrNull(null)).thenReturn(user(OWNER_ID));
+
+        assertNotNull(service.getEvidenceVO(pending, null));
+    }
+
+    @Test
+    @DisplayName("公共待审核影像允许管理员查看")
+    void pendingPublicEvidenceShouldBeVisibleToAdmin() throws Exception {
+        EvidenceServiceImpl service = newService();
+        Evidence pending = evidence(100L, OWNER_ID, 0L);
+        pending.setReviewStatus(EvidenceReviewStatusEnum.REVIEWING.getValue());
+        User admin = user(OTHER_ID);
+        when(userService.getLoginUserOrNull(null)).thenReturn(admin);
+        when(userService.isAdmin(admin)).thenReturn(true);
+
+        assertNotNull(service.getEvidenceVO(pending, null));
     }
 
     @Test
@@ -182,6 +230,23 @@ class EvidenceArchiveAuthTest {
     }
 
     @Test
+    @DisplayName("公共影像列表应拒绝非法页码和每页数量")
+    void invalidPublicPageShouldBeRejected() throws Exception {
+        EvidenceServiceImpl service = newService();
+        EvidenceQueryRequest invalidCurrent = new EvidenceQueryRequest();
+        invalidCurrent.setCurrent(0);
+        EvidenceQueryRequest invalidSize = new EvidenceQueryRequest();
+        invalidSize.setPageSize(0);
+        EvidenceQueryRequest oversizedPage = new EvidenceQueryRequest();
+        oversizedPage.setPageSize(21);
+
+        for (EvidenceQueryRequest request : Arrays.asList(invalidCurrent, invalidSize, oversizedPage)) {
+            assertThrows(BusinessException.class, () -> service.listEvidenceVOByPage(request, null));
+        }
+        verify(service, never()).page(any(), any());
+    }
+
+    @Test
     @DisplayName("查询别人档案库应被拒绝")
     void listOthersArchiveShouldBeRejected() throws Exception {
         EvidenceServiceImpl service = newService();
@@ -211,6 +276,31 @@ class EvidenceArchiveAuthTest {
         // 私有档案库里能看到自己的待审核影像，所以不能强制改成已过审
         assertNull(request.getReviewStatus());
         verify(service).page(any(), any());
+    }
+
+    @Test
+    @DisplayName("仅 archiveId 大于 0 的档案库或管理员可自动过审")
+    void onlyNonPublicArchiveOrAdminShouldAutoPass() throws Exception {
+        EvidenceServiceImpl service = newService();
+        User owner = user(OWNER_ID);
+
+        Evidence publicZero = evidence(100L, OWNER_ID, 0L);
+        service.fillReviewParams(publicZero, owner);
+        assertEquals(EvidenceReviewStatusEnum.REVIEWING.getValue(), publicZero.getReviewStatus());
+
+        Evidence publicNull = evidence(101L, OWNER_ID, null);
+        service.fillReviewParams(publicNull, owner);
+        assertEquals(EvidenceReviewStatusEnum.REVIEWING.getValue(), publicNull.getReviewStatus());
+
+        Evidence archived = evidence(102L, OWNER_ID, ARCHIVE_ID);
+        service.fillReviewParams(archived, owner);
+        assertEquals(EvidenceReviewStatusEnum.PASS.getValue(), archived.getReviewStatus());
+
+        User admin = user(OTHER_ID);
+        when(userService.isAdmin(admin)).thenReturn(true);
+        Evidence adminPublic = evidence(103L, OTHER_ID, 0L);
+        service.fillReviewParams(adminPublic, admin);
+        assertEquals(EvidenceReviewStatusEnum.PASS.getValue(), adminPublic.getReviewStatus());
     }
 
     /* ------------------------------ 上传 ------------------------------ */
@@ -349,6 +439,8 @@ class EvidenceArchiveAuthTest {
 
         assertNotNull(evidenceVO);
         assertEquals(Long.valueOf(ARCHIVE_ID), evidenceVO.getArchiveId(), "影像没有归到目标档案库");
+        assertEquals(EvidenceReviewStatusEnum.PASS.getValue(), evidenceVO.getReviewStatus(),
+                "档案库影像应按原逻辑自动过审");
         // 新增 1 张图、占用 30000 字节
         verify(archiveService).updateArchiveUsage(ARCHIVE_ID, 1L, 30000L);
     }
@@ -366,6 +458,8 @@ class EvidenceArchiveAuthTest {
 
         assertNotNull(evidenceVO);
         assertEquals(0L, evidenceVO.getArchiveId(), "公共案例库影像的 archiveId 应为 0");
+        assertEquals(EvidenceReviewStatusEnum.REVIEWING.getValue(), evidenceVO.getReviewStatus(),
+                "公共案例库影像不能自动过审");
         verify(archiveService, never()).updateArchiveUsage(anyLong(), anyLong(), anyLong());
     }
 }

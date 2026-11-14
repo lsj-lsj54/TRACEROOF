@@ -194,11 +194,12 @@ export default {
         </div>
       </section>
       <section class="filters">
-        <input id="search-input" class="input" type="search" placeholder="按昵称搜索">
-        <select id="role-select" class="input input-select">
-          <option value="">全部角色</option>
-          <option value="user">普通用户</option>
-          <option value="admin">管理员</option>
+        <input id="search-input" class="input" type="search" placeholder="按昵称搜索"
+               aria-label="按昵称搜索用户" value="${escapeHtml(query.searchText)}">
+        <select id="role-select" class="input input-select" aria-label="按用户角色筛选">
+          <option value="" ${query.userRole === '' ? 'selected' : ''}>全部角色</option>
+          <option value="user" ${query.userRole === 'user' ? 'selected' : ''}>普通用户</option>
+          <option value="admin" ${query.userRole === 'admin' ? 'selected' : ''}>管理员</option>
         </select>
       </section>
       <section class="table-wrap">

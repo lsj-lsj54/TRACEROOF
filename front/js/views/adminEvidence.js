@@ -151,7 +151,12 @@ function renderTable(el, page) {
         return;
       }
       if (action === 'reupload') {
-        openUploadModal({ evidenceId: id, onSuccess: () => load(el) });
+        const evidence = records.find((item) => String(item.id) === String(id));
+        openUploadModal({
+          evidenceId: id,
+          archiveId: evidence.archiveId,
+          onSuccess: () => load(el),
+        });
         return;
       }
       if (action === 'delete') {
@@ -208,12 +213,13 @@ export default {
         </div>
       </section>
       <section class="filters">
-        <input id="search-input" class="input" type="search" placeholder="搜索影像名称或简介">
-        <select id="status-select" class="input input-select">
-          <option value="">全部状态</option>
-          <option value="0">待审核</option>
-          <option value="1">已通过</option>
-          <option value="2">已拒绝</option>
+        <input id="search-input" class="input" type="search" placeholder="搜索影像名称或简介"
+               aria-label="搜索影像名称或简介" value="${escapeHtml(query.searchText)}">
+        <select id="status-select" class="input input-select" aria-label="按审核状态筛选">
+          <option value="" ${query.reviewStatus === '' ? 'selected' : ''}>全部状态</option>
+          <option value="0" ${String(query.reviewStatus) === '0' ? 'selected' : ''}>待审核</option>
+          <option value="1" ${String(query.reviewStatus) === '1' ? 'selected' : ''}>已通过</option>
+          <option value="2" ${String(query.reviewStatus) === '2' ? 'selected' : ''}>已拒绝</option>
         </select>
       </section>
       <section class="table-wrap">

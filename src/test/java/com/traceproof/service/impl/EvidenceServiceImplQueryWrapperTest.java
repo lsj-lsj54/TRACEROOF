@@ -1,6 +1,7 @@
 package com.traceproof.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.traceproof.exception.BusinessException;
 import com.traceproof.model.dto.evidence.EvidenceQueryRequest;
 import com.traceproof.model.entity.Evidence;
 import org.junit.jupiter.api.DisplayName;
@@ -8,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -102,5 +104,24 @@ class EvidenceServiceImplQueryWrapperTest {
         String sql = wrapper.getSqlSegment().toUpperCase();
         assertFalse(sql.contains("PICCOLORR"), "非法颜色不应生成颜色筛选: " + sql);
         assertTrue(sql.contains("DESC"), "非法颜色应回退到通用排序: " + sql);
+    }
+
+    @Test
+    @DisplayName("排序字段不在白名单中应被拒绝")
+    void invalidSortFieldShouldBeRejected() {
+        EvidenceQueryRequest request = new EvidenceQueryRequest();
+        request.setSortField("createTime, (SELECT userPassword FROM user LIMIT 1)");
+
+        assertThrows(BusinessException.class, () -> evidenceService.getQueryWrapper(request));
+    }
+
+    @Test
+    @DisplayName("非法排序方向应被拒绝")
+    void invalidSortOrderShouldBeRejected() {
+        EvidenceQueryRequest request = new EvidenceQueryRequest();
+        request.setSortField("createTime");
+        request.setSortOrder("ascend; DROP TABLE evidence");
+
+        assertThrows(BusinessException.class, () -> evidenceService.getQueryWrapper(request));
     }
 }

@@ -363,13 +363,33 @@ export function confirmDialog(message, title = '操作确认') {
           <button class="btn btn-danger" data-ok type="button">确定</button>
         </div>`,
     });
+    const root = $('#modal-root');
+    let settled = false;
+    let observer = null;
+    const settle = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (observer) {
+        observer.disconnect();
+      }
+      resolve(value);
+    };
+    // Esc、遮罩和右上角关闭都走 closeModal；弹窗真正移除时将确认框视为取消。
+    observer = new MutationObserver(() => {
+      if (!root.contains(modal)) {
+        settle(false);
+      }
+    });
+    observer.observe(root, { childList: true, subtree: true });
     $('[data-cancel]', modal).addEventListener('click', () => {
       closeModal();
-      resolve(false);
+      settle(false);
     });
     $('[data-ok]', modal).addEventListener('click', () => {
       closeModal();
-      resolve(true);
+      settle(true);
     });
   });
 }
@@ -457,10 +477,18 @@ export function truncate(text, len = 30) {
  */
 export function debounce(fn, delay = 400) {
   let timer = null;
-  return (...args) => {
+  const debounced = (...args) => {
     clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), delay);
+    timer = setTimeout(() => {
+      timer = null;
+      fn(...args);
+    }, delay);
   };
+  debounced.cancel = () => {
+    clearTimeout(timer);
+    timer = null;
+  };
+  return debounced;
 }
 
 /* ------------------------------ 片段 ------------------------------ */

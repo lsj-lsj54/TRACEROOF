@@ -1,6 +1,7 @@
 package com.traceproof.service.impl;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.traceproof.exception.BusinessException;
 import com.traceproof.model.dto.evidence.EvidenceQueryRequest;
 import com.traceproof.model.vo.EvidenceVO;
 import com.traceproof.model.vo.UserVO;
@@ -15,6 +16,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -187,6 +189,32 @@ class EvidenceCacheTest {
     }
 
     @Test
+    @DisplayName("所有实际查询字段都应参与缓存 key")
+    void allQueryFieldsShouldProduceDifferentKey() throws Exception {
+        String baseKey = buildCacheCondition(baseRequest());
+
+        EvidenceQueryRequest otherId = baseRequest();
+        otherId.setId(100L);
+        EvidenceQueryRequest otherPicSize = baseRequest();
+        otherPicSize.setPicSize(1024L);
+        EvidenceQueryRequest otherPicWidth = baseRequest();
+        otherPicWidth.setPicWidth(800);
+        EvidenceQueryRequest otherPicHeight = baseRequest();
+        otherPicHeight.setPicHeight(600);
+        EvidenceQueryRequest otherPicScale = baseRequest();
+        otherPicScale.setPicScale(1.33D);
+        EvidenceQueryRequest otherReviewMessage = baseRequest();
+        otherReviewMessage.setReviewMessage("复核");
+        EvidenceQueryRequest otherReviewerId = baseRequest();
+        otherReviewerId.setReviewerId(7L);
+
+        for (EvidenceQueryRequest request : Arrays.asList(otherId, otherPicSize, otherPicWidth,
+                otherPicHeight, otherPicScale, otherReviewMessage, otherReviewerId)) {
+            assertNotEquals(baseKey, buildCacheCondition(request), "查询字段未参与缓存 key");
+        }
+    }
+
+    @Test
     @DisplayName("字段为 null 时应能正常拼装，不应抛异常")
     void nullFieldsShouldNotThrow() throws Exception {
         EvidenceQueryRequest request = new EvidenceQueryRequest();
@@ -194,10 +222,8 @@ class EvidenceCacheTest {
         request.setPageSize(12);
         request.setSortOrder(null);
         request.setTags(null);
-        // 不抛异常且包含 null 的占位即可
         String condition = buildCacheCondition(request);
-        assertTrue(condition.contains("current=1"), condition);
-        assertTrue(condition.contains("tags") == false, "tags 为空时不该出现在 key 里");
+        assertTrue(condition.contains("\"current\":1"), condition);
     }
 
     /** 构造一个字段齐全的基础查询请求 */
@@ -209,6 +235,22 @@ class EvidenceCacheTest {
         request.setSortField("createTime");
         request.setSortOrder("descend");
         return request;
+    }
+
+    @Test
+    @DisplayName("缓存公共影像列表应拒绝非法页码和每页数量")
+    void invalidPublicPageShouldBeRejectedBeforeCacheAccess() {
+        EvidenceQueryRequest invalidCurrent = baseRequest();
+        invalidCurrent.setCurrent(0);
+        EvidenceQueryRequest invalidSize = baseRequest();
+        invalidSize.setPageSize(0);
+        EvidenceQueryRequest oversizedPage = baseRequest();
+        oversizedPage.setPageSize(21);
+
+        for (EvidenceQueryRequest request : Arrays.asList(invalidCurrent, invalidSize, oversizedPage)) {
+            assertThrows(BusinessException.class,
+                    () -> service.listEvidenceVOByPageWithCache(request, null));
+        }
     }
 
     /* ------------------------------ 清缓存 ------------------------------ */
@@ -225,5 +267,7 @@ class EvidenceCacheTest {
         com.github.benmanes.caffeine.cache.Cache<?, ?> cache =
                 (com.github.benmanes.caffeine.cache.Cache<?, ?>) field.get(service);
         assertEquals(0, cache.estimatedSize(), "clearEvidenceCache 没有真正清空本地缓存");
+        assertEquals(500L, cache.policy().eviction().orElseThrow().getMaximum(),
+                "本地缓存容量上限应为 500");
     }
 }

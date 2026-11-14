@@ -52,15 +52,21 @@ export function setNotLoginHandler(handler) {
  *
  * @param {string} url    接口路径，以 / 开头
  * @param {object} options fetch 配置，body 为普通对象时自动转 JSON
+ * @param {AbortSignal} [options.signal] 调用方取消信号
+ * @param {number} [options.timeout] 超时毫秒数，默认 30000，传 0 可关闭
  * @returns {Promise<any>} 接口返回的 data 字段
  */
 async function request(url, options = {}) {
-  const { method = 'GET', body, headers = {} } = options;
+  const {
+    method = 'GET', body, headers = {}, signal, timeout = 30000,
+  } = options;
+  const controller = new AbortController();
   const init = {
     method,
     // 跨域携带 Cookie，否则登录态会丢
     credentials: 'include',
     headers: { ...headers },
+    signal: controller.signal,
   };
 
   if (body instanceof FormData) {
@@ -71,17 +77,58 @@ async function request(url, options = {}) {
     init.body = JSON.stringify(body);
   }
 
+  let timedOut = false;
+  const onExternalAbort = () => controller.abort(signal.reason);
+  if (signal) {
+    if (signal.aborted) {
+      onExternalAbort();
+    } else {
+      signal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+  const timeoutMs = Number(timeout);
+  const timer = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs)
+    : null;
+
   let response;
   try {
     response = await fetch(API_BASE + url, init);
   } catch (e) {
+    // 调用方主动取消时保留原始 AbortError，便于调用方按取消流程处理。
+    if (signal && signal.aborted) {
+      throw e;
+    }
+    if (timedOut) {
+      const error = new Error(`请求超时（${timeoutMs}ms），请稍后重试`);
+      error.name = 'TimeoutError';
+      throw error;
+    }
     // 服务端在解析请求体阶段直接断开连接时，浏览器同样只会抛网络错误，
     // 因此这里要提示排查方向，不能只让用户以为后端没启动。
     throw new Error(`请求发送失败（${API_BASE}）。请确认后端已启动；若正在上传大文件，可能是服务端体积限制导致连接被断开。`);
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+    if (signal) {
+      signal.removeEventListener('abort', onExternalAbort);
+    }
   }
 
   if (!response.ok) {
-    throw new Error(`请求失败（HTTP ${response.status}）`);
+    const text = await response.text();
+    let message = text;
+    try {
+      const result = JSON.parse(text);
+      message = (result && result.message) || text;
+    } catch (e) {
+      // 非 JSON 响应直接把文本作为服务端错误信息。
+    }
+    throw new Error(message || `请求失败（HTTP ${response.status}）`);
   }
 
   const text = await response.text();

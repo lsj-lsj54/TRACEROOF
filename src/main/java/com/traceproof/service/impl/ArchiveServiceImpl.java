@@ -62,6 +62,12 @@ import java.util.stream.Collectors;
 public class ArchiveServiceImpl extends ServiceImpl<ArchiveMapper, Archive>
         implements ArchiveService {
 
+    private static final Set<String> SORT_FIELDS = Set.of(
+            "id", "archiveName", "archiveLevel", "archiveType", "maxSize", "maxCount",
+            "totalSize", "totalCount", "userId", "createTime", "editTime", "updateTime");
+
+    private static final Set<String> SORT_ORDERS = Set.of("ascend", "descend");
+
     private final UserService userService;
 
     private final ArchiveUserService archiveUserService;
@@ -280,6 +286,11 @@ public class ArchiveServiceImpl extends ServiceImpl<ArchiveMapper, Archive>
         Integer archiveType = archiveQueryRequest.getArchiveType();
         String sortField = archiveQueryRequest.getSortField();
         String sortOrder = archiveQueryRequest.getSortOrder();
+
+        ThrowUtils.throwIf(StrUtil.isNotBlank(sortField) && !SORT_FIELDS.contains(sortField),
+                ErrorCode.PARAMS_ERROR, "排序字段不合法");
+        ThrowUtils.throwIf(StrUtil.isNotBlank(sortOrder) && !SORT_ORDERS.contains(sortOrder),
+                ErrorCode.PARAMS_ERROR, "排序方向不合法");
 
         queryWrapper.eq(ObjUtil.isNotEmpty(id), "id", id);
         queryWrapper.eq(ObjUtil.isNotEmpty(userId), "userId", userId);

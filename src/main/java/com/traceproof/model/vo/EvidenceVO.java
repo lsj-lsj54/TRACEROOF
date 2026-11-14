@@ -105,6 +105,16 @@ public class EvidenceVO implements Serializable {
     private Integer reviewStatus;
 
     /**
+     * 审核说明；拒绝影像时向上传者展示具体原因。
+     */
+    private String reviewMessage;
+
+    /**
+     * 审核时间。
+     */
+    private Date reviewTime;
+
+    /**
      * 档案库 id
      * <p>
      * 为空表示公共档案库（公共案例库），不为空表示该影像属于对应的私有档案库。

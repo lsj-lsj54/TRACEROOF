@@ -1,12 +1,14 @@
 package com.traceproof.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.traceproof.exception.BusinessException;
 import com.traceproof.model.dto.user.UserQueryRequest;
 import com.traceproof.model.entity.User;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -60,6 +62,25 @@ class UserServiceImplQueryWrapperTest {
         QueryWrapper<User> wrapper = userService.getQueryWrapper(request);
         assertTrue(wrapper.getSqlSegment().toUpperCase().contains("DESC"),
                 "未生成降序: " + wrapper.getSqlSegment());
+    }
+
+    @Test
+    @DisplayName("排序字段不在白名单中应被拒绝")
+    void invalidSortFieldShouldBeRejected() {
+        UserQueryRequest request = new UserQueryRequest();
+        request.setSortField("createTime, (SELECT userPassword FROM user LIMIT 1)");
+
+        assertThrows(BusinessException.class, () -> userService.getQueryWrapper(request));
+    }
+
+    @Test
+    @DisplayName("非法排序方向应被拒绝")
+    void invalidSortOrderShouldBeRejected() {
+        UserQueryRequest request = new UserQueryRequest();
+        request.setSortField("createTime");
+        request.setSortOrder("ascend; DROP TABLE user");
+
+        assertThrows(BusinessException.class, () -> userService.getQueryWrapper(request));
     }
 
     @Test

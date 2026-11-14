@@ -81,7 +81,7 @@ services:
       MYBATIS_PLUS_CONFIGURATION_LOG_IMPL: org.apache.ibatis.logging.nologging.NoLoggingImpl
       # 固定堆大小而不是按比例：按比例在 12GB 的机器上会算出 7GB 的最大堆，
       # 白白让 JVM 敢往上涨；小机器上写死更好预测。
-      JAVA_OPTS: "-Xms128m -Xmx512m -XX:MaxMetaarchiveSize=192m -XX:+UseSerialGC -Dfile.encoding=UTF-8 -XX:+ExitOnOutOfMemoryError"
+      JAVA_OPTS: "-Xms128m -Xmx512m -XX:MaxMetaspaceSize=192m -XX:+UseSerialGC -Dfile.encoding=UTF-8 -XX:+ExitOnOutOfMemoryError"
     stop_grace_period: 30s
     logging:
       driver: json-file

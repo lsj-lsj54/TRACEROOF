@@ -39,32 +39,36 @@ public class EvidenceEditEventWorkHandler implements WorkHandler<EvidenceEditEve
 
     @Override
     public void onEvent(EvidenceEditEvent event) throws Exception {
-        EvidenceEditRequestMessage evidenceEditRequestMessage = event.getEvidenceEditRequestMessage();
-        WebSocketSession session = event.getSession();
-        User user = event.getUser();
-        Long evidenceId = event.getEvidenceId();
-        // 获取消息类别
-        String type = evidenceEditRequestMessage.getType();
-        EvidenceEditMessageTypeEnum evidenceEditMessageTypeEnum = EvidenceEditMessageTypeEnum.getEnumByValue(type);
-        if (evidenceEditMessageTypeEnum == null) {
-            sendErrorMessage(session, user, "消息类型错误");
-            return;
-        }
-        EvidenceEditHandler.EvidenceEditContext evidenceEditContext =
-                new EvidenceEditHandler.EvidenceEditContext(evidenceEditRequestMessage, session, user, evidenceId);
-        // 调用对应的消息处理方法
-        switch (evidenceEditMessageTypeEnum) {
-            case ENTER_EDIT:
-                evidenceEditHandler.handleEnterEditMessage(evidenceEditContext);
-                break;
-            case EDIT_ACTION:
-                evidenceEditHandler.handleEditActionMessage(evidenceEditContext);
-                break;
-            case EXIT_EDIT:
-                evidenceEditHandler.handleExitEditMessage(evidenceEditContext);
-                break;
-            default:
+        try {
+            EvidenceEditRequestMessage evidenceEditRequestMessage = event.getEvidenceEditRequestMessage();
+            WebSocketSession session = event.getSession();
+            User user = event.getUser();
+            Long evidenceId = event.getEvidenceId();
+            // 获取消息类别
+            String type = evidenceEditRequestMessage.getType();
+            EvidenceEditMessageTypeEnum evidenceEditMessageTypeEnum = EvidenceEditMessageTypeEnum.getEnumByValue(type);
+            if (evidenceEditMessageTypeEnum == null) {
                 sendErrorMessage(session, user, "消息类型错误");
+                return;
+            }
+            EvidenceEditHandler.EvidenceEditContext evidenceEditContext =
+                    new EvidenceEditHandler.EvidenceEditContext(evidenceEditRequestMessage, session, user, evidenceId);
+            // 调用对应的消息处理方法
+            switch (evidenceEditMessageTypeEnum) {
+                case ENTER_EDIT:
+                    evidenceEditHandler.handleEnterEditMessage(evidenceEditContext);
+                    break;
+                case EDIT_ACTION:
+                    evidenceEditHandler.handleEditActionMessage(evidenceEditContext);
+                    break;
+                case EXIT_EDIT:
+                    evidenceEditHandler.handleExitEditMessage(evidenceEditContext);
+                    break;
+                default:
+                    sendErrorMessage(session, user, "消息类型错误");
+            }
+        } finally {
+            event.clear();
         }
     }
 

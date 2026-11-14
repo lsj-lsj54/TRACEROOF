@@ -32,4 +32,14 @@ public class EvidenceEditEvent {
      * 影像 id
      */
     private Long evidenceId;
+
+    /**
+     * 消费完成后释放 RingBuffer 槽位中的对象引用
+     */
+    public void clear() {
+        this.evidenceEditRequestMessage = null;
+        this.session = null;
+        this.user = null;
+        this.evidenceId = null;
+    }
 }

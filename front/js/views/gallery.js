@@ -36,6 +36,11 @@ const query = {
   sortOrder: 'descend',
 };
 
+/** 旧请求、旧观察器和旧计时器都不能影响新一轮视图 */
+let loadGeneration = 0;
+let stopReveal = () => {};
+let cancelDebounces = () => {};
+
 /** 按色筛选时重置页码并重新拉取 */
 function reload(el) {
   query.current = 1;
@@ -91,7 +96,12 @@ function syncColorControls(el) {
 
 /** 拉取当前页数据并渲染 */
 async function load(el) {
+  const generation = ++loadGeneration;
   const grid = $('#grid', el);
+  if (!grid) {
+    return;
+  }
+  stopReveal();
   // 骨架屏占位：与真实卡片同构，避免加载时页面高度剧烈跳动
   grid.innerHTML = renderSkeleton(PAGE_SIZE);
   try {
@@ -99,9 +109,26 @@ async function load(el) {
     const data = USE_CACHE
       ? await evidenceApi.listVOByPageWithCache({ ...query })
       : await evidenceApi.listVOByPage({ ...query });
-    renderGrid(el, normalizePage(data));
+    if (generation !== loadGeneration || el.isConnected === false) {
+      return;
+    }
+    const page = normalizePage(data);
+    // 删除当前页最后一条后自动回到最后一个有效页，避免出现假的“无数据”。
+    if (page.records.length === 0 && page.current > 1 && page.total > 0) {
+      query.current = Math.max(1, Math.ceil(page.total / page.size));
+      load(el);
+      return;
+    }
+    renderGrid(el, page);
   } catch (e) {
-    grid.innerHTML = renderEmpty(e.message);
+    if (generation !== loadGeneration || el.isConnected === false || e.name === 'AbortError') {
+      return;
+    }
+    grid.innerHTML = `<div class="empty empty-error" role="alert">
+      <span>${escapeHtml(e.message)}</span>
+      <button class="btn btn-sm" id="grid-retry" type="button">重新加载</button>
+    </div>`;
+    $('#grid-retry', grid).addEventListener('click', () => load(el));
   }
 }
 
@@ -129,8 +156,8 @@ function renderGrid(el, page) {
         : '';
       return `
         <article class="card reveal" data-id="${item.id}">
-          <div class="card-img">
-            <img src="${escapeHtml(thumbUrl(item))}" alt="${escapeHtml(item.name)}" loading="lazy" data-fade>
+          <div class="card-img" role="button" tabindex="0" aria-label="全屏查看：${escapeHtml(item.name)}">
+            <img src="${escapeHtml(thumbUrl(item))}" alt="${escapeHtml(item.name)}" loading="lazy" decoding="async" data-fade>
             ${review ? `<span class="card-badge ${review.cls}">${review.text}</span>` : ''}
             <div class="card-quick">
               <button class="btn btn-sm" data-action="zoom" type="button" title="全屏查看">放大</button>
@@ -169,6 +196,12 @@ function renderGrid(el, page) {
   $$('.card-img', grid).forEach((imgBox) => {
     imgBox.addEventListener('click', () => {
       openViewer(imgBox.closest('.card').dataset.id);
+    });
+    imgBox.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openViewer(imgBox.closest('.card').dataset.id);
+      }
     });
   });
 
@@ -209,7 +242,7 @@ function renderGrid(el, page) {
 
   // 影像淡入 / 卡片错峰入场的动效绑定（放在模板写入之后、事件绑定之后均可）
   bindImageFade(grid);
-  revealOnScroll(grid);
+  stopReveal = revealOnScroll(grid);
   attachRippleAll(grid);
   $$('[data-action], .color-swatch', grid).forEach(attachRipple);
 }
@@ -221,6 +254,7 @@ export default {
    * @param {HTMLElement} el 视图容器
    */
   render(el) {
+    cancelDebounces();
     const categoryOptions = CATEGORY_OPTIONS
       .map((item) => `<option value="${item}" ${item === query.category ? 'selected' : ''}>${item}</option>`)
       .join('');
@@ -229,42 +263,61 @@ export default {
       <section class="toolbar">
         <div class="toolbar-left">
           <input id="search-input" class="input" type="search" placeholder="搜索影像名称或简介"
-                 value="${escapeHtml(query.searchText)}">
-          <select id="category-select" class="input input-select">
+                 aria-label="搜索影像名称或简介" value="${escapeHtml(query.searchText)}">
+          <select id="category-select" class="input input-select" aria-label="按分类筛选">
             <option value="">全部分类</option>
             ${categoryOptions}
           </select>
           <div class="color-filter" id="color-filter">
             <label class="color-field" title="按主色调筛选相似影像">
               <span class="color-field-label">主色调</span>
-              <input type="color" id="color-input" value="${DEFAULT_PICKER_COLOR}">
+              <input type="color" id="color-input" value="${query.picColor || DEFAULT_PICKER_COLOR}" aria-label="选择主色调">
             </label>
             <label class="color-range" title="相似度容差，越大匹配越宽松">
-              <span>容差 <b id="color-dist-val">${DEFAULT_COLOR_DISTANCE}</b></span>
+              <span>容差 <b id="color-dist-val">${query.colorDistance}</b></span>
               <input type="range" id="color-dist" min="0" max="${MAX_COLOR_DISTANCE}" step="5"
-                     value="${DEFAULT_COLOR_DISTANCE}">
+                     value="${query.colorDistance}" aria-label="主色调相似度容差">
             </label>
             <button class="btn btn-sm" id="color-clear" type="button" hidden>清除颜色</button>
           </div>
         </div>
         <div class="toolbar-right">
-          <select id="sort-select" class="input input-select">
-            <option value="createTime-descend">最新上传</option>
-            <option value="createTime-ascend">最早上传</option>
-            <option value="picSize-descend">体积从大到小</option>
+          <select id="sort-select" class="input input-select" aria-label="影像排序方式">
+            <option value="createTime-descend" ${query.sortField === 'createTime' && query.sortOrder === 'descend' ? 'selected' : ''}>最新上传</option>
+            <option value="createTime-ascend" ${query.sortField === 'createTime' && query.sortOrder === 'ascend' ? 'selected' : ''}>最早上传</option>
+            <option value="picSize-descend" ${query.sortField === 'picSize' ? 'selected' : ''}>体积从大到小</option>
           </select>
+          <button class="btn" id="reset-filters" type="button" title="清空搜索、分类和颜色筛选">重置筛选</button>
           <button class="btn btn-primary" id="upload-btn" type="button">上传影像</button>
         </div>
       </section>
       <section id="grid" class="grid"></section>
       <div id="pager"></div>`;
 
-    // 搜索防抖
-    $('#search-input', el).addEventListener('input', debounce((e) => {
+    // 所有防抖计时器在离开视图时统一取消，避免旧页面再次发请求。
+    const onSearch = debounce((e) => {
       query.searchText = e.target.value.trim();
       query.current = 1;
       load(el);
-    }, 400));
+    }, 400);
+    const onColorPick = debounce((e) => {
+      const hex = e.target.value || '';
+      if (hex) {
+        applyColor(hex, el);
+      }
+    }, 300);
+    const onDistanceChange = debounce(() => {
+      if (query.picColor) {
+        reload(el);
+      }
+    }, 250);
+    cancelDebounces = () => {
+      onSearch.cancel();
+      onColorPick.cancel();
+      onDistanceChange.cancel();
+    };
+
+    $('#search-input', el).addEventListener('input', onSearch);
 
     $('#category-select', el).addEventListener('change', (e) => {
       query.category = e.target.value;
@@ -281,25 +334,29 @@ export default {
     });
 
     // 取色器：拖动即筛选，防抖避免频繁请求
-    $('#color-input', el).addEventListener('input', debounce((e) => {
-      const hex = e.target.value || '';
-      if (!hex) {
-        return;
-      }
-      applyColor(hex, el);
-    }, 300));
+    $('#color-input', el).addEventListener('input', onColorPick);
 
     // 容差滑块：仅在选择颜色后才会触发重新筛选
     $('#color-dist', el).addEventListener('input', (e) => {
       const v = Number(e.target.value);
       query.colorDistance = v;
       $('#color-dist-val', el).textContent = String(v);
-      if (query.picColor) {
-        reload(el);
-      }
+      onDistanceChange();
     });
 
     $('#color-clear', el).addEventListener('click', () => clearColor(el));
+    $('#reset-filters', el).addEventListener('click', () => {
+      Object.assign(query, {
+        current: 1,
+        searchText: '',
+        category: '',
+        picColor: '',
+        colorDistance: DEFAULT_COLOR_DISTANCE,
+        sortField: 'createTime',
+        sortOrder: 'descend',
+      });
+      this.render(el);
+    });
 
     // 颜色筛选：把已存在的查询态同步到控件，避免重新进入页面时控件与 query 不一致
     const colorInput = $('#color-input', el);
@@ -318,5 +375,12 @@ export default {
     });
 
     load(el);
+  },
+
+  destroy() {
+    loadGeneration += 1;
+    cancelDebounces();
+    stopReveal();
+    stopReveal = () => {};
   },
 };

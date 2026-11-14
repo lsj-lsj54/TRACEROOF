@@ -2,6 +2,7 @@ package com.traceproof.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.traceproof.exception.BusinessException;
 import com.traceproof.model.dto.archive.ArchiveQueryRequest;
 import com.traceproof.model.entity.Archive;
 import com.traceproof.model.entity.User;
@@ -20,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -104,6 +106,25 @@ class ArchiveServiceImplQueryWrapperTest {
         descend.setSortField("createTime");
         descend.setSortOrder("descend");
         assertTrue(archiveService.getQueryWrapper(descend).getSqlSegment().toUpperCase().contains("DESC"));
+    }
+
+    @Test
+    @DisplayName("排序字段不在白名单中应被拒绝")
+    void invalidSortFieldShouldBeRejected() {
+        ArchiveQueryRequest request = new ArchiveQueryRequest();
+        request.setSortField("createTime, (SELECT userPassword FROM user LIMIT 1)");
+
+        assertThrows(BusinessException.class, () -> archiveService.getQueryWrapper(request));
+    }
+
+    @Test
+    @DisplayName("非法排序方向应被拒绝")
+    void invalidSortOrderShouldBeRejected() {
+        ArchiveQueryRequest request = new ArchiveQueryRequest();
+        request.setSortField("createTime");
+        request.setSortOrder("descend; DROP TABLE archive");
+
+        assertThrows(BusinessException.class, () -> archiveService.getQueryWrapper(request));
     }
 
     /* ------------------------------ 单条 VO ------------------------------ */

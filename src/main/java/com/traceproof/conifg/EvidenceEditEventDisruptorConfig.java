@@ -27,7 +27,7 @@ public class EvidenceEditEventDisruptorConfig {
     @Bean("evidenceEditEventDisruptor")
     public Disruptor<EvidenceEditEvent> evidenceEditEventDisruptor() {
         // ringBuffer 的大小，必须是 2 的 N 次方
-        int bufferSize = 1024 * 256;
+        int bufferSize = 4096;
         ThreadFactory threadFactory = new ThreadFactory() {
             private final AtomicInteger index = new AtomicInteger(1);
 

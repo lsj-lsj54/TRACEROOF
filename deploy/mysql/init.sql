@@ -1,7 +1,7 @@
 -- 证链·物流异常件影像取证平台数据库初始化脚本（可重复执行）
 --
 -- 与 src/main/resources/application.yml 中的库名保持一致：evidence
--- 覆盖三张表：user（用户）、evidence（影像，含审核字段与档案库归属）、archive（档案库）。
+-- 覆盖四张表：user（用户）、evidence（影像，含审核字段与档案库归属）、archive（档案库）、archive_user（团队成员）。
 --
 -- 注意原来的几份脚本有几个坑，已在部署时统一到这里：
 --   1. create_table_evidence.sql 用 ALTER TABLE 追加审核字段，重复执行会报 Duplicate column；
@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS `archive`
     id         bigint AUTO_INCREMENT COMMENT 'id' PRIMARY KEY,
     archiveName  varchar(128)                        NULL COMMENT '档案库名称',
     archiveLevel int      DEFAULT 0                  NULL COMMENT '档案库级别：0-普通版 1-专业版 2-旗舰版',
+    archiveType int      DEFAULT 0                  NOT NULL COMMENT '档案库类型：0-私有 1-团队',
     maxSize    bigint   DEFAULT 0                  NULL COMMENT '档案库影像的最大总大小',
     maxCount   bigint   DEFAULT 0                  NULL COMMENT '档案库影像的最大数量',
     totalSize  bigint   DEFAULT 0                  NULL COMMENT '当前档案库下影像的总大小',
@@ -95,5 +96,20 @@ CREATE TABLE IF NOT EXISTS `archive`
     isDelete   tinyint  DEFAULT 0                  NOT NULL COMMENT '是否删除',
     INDEX idx_userId (userId),
     INDEX idx_archiveName (archiveName),
-    INDEX idx_archiveLevel (archiveLevel)
+    INDEX idx_archiveLevel (archiveLevel),
+    INDEX idx_archiveType (archiveType)
 ) COMMENT '档案库' COLLATE = utf8mb4_unicode_ci;
+
+-- 档案库成员表（仅团队档案库使用）
+CREATE TABLE IF NOT EXISTS `archive_user`
+(
+    id          bigint AUTO_INCREMENT COMMENT 'id' PRIMARY KEY,
+    archiveId   bigint                                 NOT NULL COMMENT '档案库 id',
+    userId      bigint                                 NOT NULL COMMENT '用户 id',
+    archiveRole varchar(128) DEFAULT 'viewer'          NULL COMMENT '档案库角色：viewer/editor/admin',
+    createTime  datetime     DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT '创建时间',
+    updateTime  datetime     DEFAULT CURRENT_TIMESTAMP NOT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    UNIQUE KEY uk_archiveId_userId (archiveId, userId),
+    INDEX idx_archiveId (archiveId),
+    INDEX idx_userId (userId)
+) COMMENT '档案库用户关联' COLLATE = utf8mb4_unicode_ci;

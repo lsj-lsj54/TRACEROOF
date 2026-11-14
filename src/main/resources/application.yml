@@ -10,6 +10,8 @@ server:
       max-file-size: 10MB
       max-request-size: 10MB
   tomcat:
+    threads:
+      max: 50
     # 请求被拒绝时允许吞掉的字节数，避免大文件失败后连接被直接断开
     max-swallow-size: 20MB
 
@@ -52,6 +54,7 @@ spring:
         url: ${spring.datasource.url}
         username: ${spring.datasource.username}
         password: ${spring.datasource.password}
+        maximum-pool-size: 10
     rules:
       sharding:
         tables:
@@ -79,7 +82,7 @@ spring:
     # sql-show 是全局属性，必须放在 rules 外面；
     # 写在 rules.sharding.props 下不会生效（那里是分片规则自己的属性）。
     props:
-      sql-show: true
+      sql-show: ${SHARDINGSPHERE_SQL_SHOW:false}
 # Sa-Token 配置
 # 登录态改用 Sa-Token 管理：登录后 token 写入 Cookie（satoken），前端沿用 credentials: 'include'，
 # 无需改动前端即可维持登录态。会话数据存 Redis（sa-token-redis-jackson）。
@@ -116,8 +119,8 @@ sa-token:
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: false
-    # 仅在开发环境开启日志
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    # 默认不输出 SQL，本地可通过环境变量切回 StdOutImpl
+    log-impl: ${MYBATIS_PLUS_CONFIGURATION_LOG_IMPL:org.apache.ibatis.logging.nologging.NoLoggingImpl}
   global-config:
     db-config:
       logic-delete-field: isDelete # 全局逻辑删除的实体字段名
@@ -126,7 +129,7 @@ mybatis-plus:
     enable-sql-runner: true
 # 接口文档配置
 knife4j:
-  enable: true
+  enable: ${KNIFE4J_ENABLE:false}
   openapi:
     title: "接口文档"
     version: 1.0

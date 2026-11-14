@@ -4,7 +4,7 @@
 import { evidenceApi } from '../api.js';
 import {
   $, $$, state, toast, showModal, closeModal, escapeHtml,
-  getFormValues, formatTime, formatSize, CATEGORY_OPTIONS, debounce,
+  getFormValues, formatTime, formatSize, CATEGORY_OPTIONS, debounce, reviewTag,
 } from '../ui.js';
 import { openLightbox } from './lightbox.js';
 import { openCoEdit } from './coEdit.js';
@@ -122,6 +122,9 @@ export function compressImage(file) {
         }
         const name = file.name.replace(/\.[^.]+$/, '') + '.' + suffix;
         resolve(new File([best], name, { type }));
+      } catch (e) {
+        // onload 内的异步异常不会触发外层 Promise 的 reject，统一回退原文件避免任务悬挂。
+        resolve(file);
       } finally {
         releaseUrl(objectUrl);
       }
@@ -274,7 +277,7 @@ export function openUploadModal({
             <span class="upload-status ${task.status}">${task.statusText}</span>
           </div>
         </div>
-        <button class="icon-btn" data-remove="${index}" type="button"
+        <button class="icon-btn" data-remove="${index}" type="button" aria-label="移除 ${escapeHtml(task.file.name)}"
           ${task.status === 'uploading' ? 'disabled' : ''}>✕</button>
       </div>`).join('');
     startBtn.disabled = tasks.some((task) => task.status === 'uploading') || tasks.length === 0;
@@ -393,7 +396,9 @@ export function openUploadModal({
         if (typeof onSuccess === 'function') {
           onSuccess();
         }
-        closeModal();
+        if (modal.isConnected !== false) {
+          closeModal();
+        }
       } catch (e) {
         setUrlHint(e.message, true);
         startBtn.disabled = false;
@@ -427,14 +432,24 @@ export function openUploadModal({
       renderList();
     }
 
+    const failed = pending.length - success;
     if (success > 0) {
-      toast(isOverwrite ? '重新上传成功' : `成功上传 ${success} 张影像`, 'success');
+      toast(isOverwrite ? '重新上传成功' : `成功 ${success} 张${failed ? `，失败 ${failed} 张` : ''}`,
+        failed ? 'info' : 'success');
       if (typeof onSuccess === 'function') {
         onSuccess();
       }
-      closeModal();
+    }
+    if (failed === 0) {
+      // 旧上传任务结束时不能误关用户随后打开的新弹窗。
+      if (modal.isConnected !== false) {
+        closeModal();
+      }
     } else {
+      // 保留失败项，下一次点击只会重试未成功的文件。
       startBtn.disabled = false;
+      startBtn.textContent = `重试失败项（${failed}）`;
+      renderList();
     }
   });
 
@@ -520,7 +535,7 @@ export async function openEvidenceDetail(id, { onChanged } = {}) {
       <div class="detail">
         <div class="detail-img" id="detail-img" role="button" tabindex="0"
              aria-label="全屏查看影像">
-          <img src="${escapeHtml(originUrl(evidence))}" alt="${escapeHtml(evidence.name)}">
+          <img src="${escapeHtml(originUrl(evidence))}" alt="${escapeHtml(evidence.name)}" decoding="async">
         </div>
         <div class="detail-info">
           <div class="detail-row"><span>简介</span><p>${escapeHtml(evidence.introduction) || '暂无简介'}</p></div>
@@ -535,11 +550,14 @@ export async function openEvidenceDetail(id, { onChanged } = {}) {
     ? `档案库（<a href="#/archive/detail?id=${encodeURIComponent(evidence.archiveId)}">去档案库查看</a>）`
     : '公共案例库'}</p></div>
           <div class="detail-row"><span>上传时间</span><p>${formatTime(evidence.createTime)}</p></div>
+          <div class="detail-row"><span>审核状态</span><p>${reviewTag(evidence.reviewStatus)}</p></div>
+          ${evidence.reviewMessage ? `<div class="detail-row detail-review"><span>审核说明</span><p>${escapeHtml(evidence.reviewMessage)}</p></div>` : ''}
+          ${evidence.reviewTime ? `<div class="detail-row"><span>审核时间</span><p>${formatTime(evidence.reviewTime)}</p></div>` : ''}
           <div class="detail-actions">
             <a class="btn btn-sm" href="${escapeHtml(originUrl(evidence))}" target="_blank" rel="noopener">查看原图</a>
             ${editable ? '<button class="btn btn-sm btn-primary" id="detail-edit" type="button">编辑信息</button>' : ''}
             ${editable ? '<button class="btn btn-sm" id="detail-reupload" type="button">重新上传</button>' : ''}
-            ${editable ? '<button class="btn btn-sm" id="detail-coedit" type="button">在线编辑</button>' : ''}
+            ${editable ? '<button class="btn btn-sm" id="detail-coedit" type="button" title="多人同步缩放与旋转，不修改原始影像">协同核对</button>' : ''}
           </div>
         </div>
       </div>`,
@@ -643,6 +661,9 @@ export function openEditModal(evidence, { onSuccess } = {}) {
       category: values.category,
       tags,
     };
+    const submitBtn = e.target.querySelector('[type="submit"]');
+    submitBtn.disabled = true;
+    submitBtn.textContent = '保存中…';
     try {
       // 管理员走 /evidence/update，普通用户走 /evidence/edit
       if (state.isAdmin()) {
@@ -657,6 +678,11 @@ export function openEditModal(evidence, { onSuccess } = {}) {
       }
     } catch (err) {
       toast(err.message, 'error');
+    } finally {
+      if (submitBtn.isConnected !== false) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = '保存';
+      }
     }
   });
 }

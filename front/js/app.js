@@ -20,7 +20,10 @@ const routes = [
 /** 当前视图实例，切换路由前先调用它的 destroy */
 let currentView = null;
 
-/** 因未登录被拦截的地址，登录成功后跳回 */
+/** 路由序号：动态 import 后只允许最新一次导航渲染 */
+let routeGeneration = 0;
+
+/** 因未登录被拦截的地址（含查询参数），登录成功后跳回 */
 let pendingPath = null;
 
 /* ------------------------------ 路由 ------------------------------ */
@@ -33,7 +36,7 @@ function parseHash() {
   new URLSearchParams(search).forEach((value, key) => {
     query[key] = value;
   });
-  return { path: path || '/', query };
+  return { path: path || '/', query, fullPath: raw };
 }
 
 /** 匹配路由规则 */
@@ -110,6 +113,11 @@ function bindShellEvents() {
     // 详情页也要让「我的档案库」保持高亮，所以子路径用前缀匹配
     const active = target === '/' ? path === '/' : path.startsWith(target);
     link.classList.toggle('active', active);
+    if (active) {
+      link.setAttribute('aria-current', 'page');
+    } else {
+      link.removeAttribute('aria-current');
+    }
   });
 
   const loginBtn = $('#login-btn');
@@ -153,7 +161,8 @@ export function refreshShellUserName() {
 
 /** 路由分发 */
 async function resolveRoute() {
-  const { path, query } = parseHash();
+  const generation = ++routeGeneration;
+  const { path, query, fullPath } = parseHash();
   const route = matchRoute(path);
 
   // 未知路径统一回到首页
@@ -163,7 +172,7 @@ async function resolveRoute() {
   }
   // 权限判断
   if (route.auth && !state.isLogin()) {
-    pendingPath = route.path;
+    pendingPath = fullPath;
     toast('请先登录', 'info');
     navigate('/login');
     return;
@@ -184,7 +193,18 @@ async function resolveRoute() {
   // 路由切换时先铺一层骨架屏，避免「白屏 → 内容突然出现」的割裂感
   viewEl.innerHTML = renderSkeleton(6);
 
-  const module = await route.view();
+  let module;
+  try {
+    module = await route.view();
+  } catch (e) {
+    if (generation !== routeGeneration) {
+      return;
+    }
+    throw e;
+  }
+  if (generation !== routeGeneration) {
+    return;
+  }
   currentView = module.default;
   currentView.render(viewEl, query);
 }
@@ -226,6 +246,7 @@ function initNotLoginHandler() {
       return;
     }
     state.setCurrentUser(null);
+    pendingPath = parseHash().fullPath;
     toast('登录已过期，请重新登录', 'error');
     navigate('/login');
   });
@@ -240,6 +261,7 @@ export function requireLogin() {
   if (state.isLogin()) {
     return true;
   }
+  pendingPath = parseHash().fullPath;
   toast('请先登录后再使用该功能', 'info');
   navigate('/login');
   return false;

@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static com.traceproof.model.constant.UserConstant.USER_LOGIN_STATE;
@@ -43,6 +44,12 @@ import static com.traceproof.model.constant.UserConstant.USER_LOGIN_STATE;
 @Slf4j
 public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         implements UserService {
+
+    private static final Set<String> SORT_FIELDS = Set.of(
+            "id", "userAccount", "userName", "userAvatar", "userProfile", "userRole",
+            "createTime", "editTime", "updateTime");
+
+    private static final Set<String> SORT_ORDERS = Set.of("ascend", "descend");
 
     /**
      * 用户注册
@@ -310,6 +317,10 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         String userRole = userQueryRequest.getUserRole();
         String sortField = userQueryRequest.getSortField();
         String sortOrder = userQueryRequest.getSortOrder();
+        ThrowUtils.throwIf(StrUtil.isNotBlank(sortField) && !SORT_FIELDS.contains(sortField),
+                ErrorCode.PARAMS_ERROR, "排序字段不合法");
+        ThrowUtils.throwIf(StrUtil.isNotBlank(sortOrder) && !SORT_ORDERS.contains(sortOrder),
+                ErrorCode.PARAMS_ERROR, "排序方向不合法");
         QueryWrapper<User> queryWrapper = new QueryWrapper<>();
         queryWrapper.eq(Objects.nonNull(id), "id", id);
         queryWrapper.eq(StrUtil.isNotBlank(userRole), "userRole", userRole);
@@ -318,7 +329,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         queryWrapper.like(StrUtil.isNotBlank(userProfile), "userProfile", userProfile);
         // 常量写在前面：sortOrder 为 null 时不会抛 NPE
         // （写成 sortOrder.equals("ascend") 会在 isNotBlank 拦下之前就抛异常）
-        queryWrapper.orderBy(StrUtil.isNotBlank(sortOrder), "ascend".equals(sortOrder), sortField);
+        queryWrapper.orderBy(StrUtil.isNotBlank(sortField), "ascend".equals(sortOrder), sortField);
         return queryWrapper;
     }
 

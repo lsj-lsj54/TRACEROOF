@@ -39,7 +39,13 @@ public class RedissonConfig {
         Config config = new Config();
         SingleServerConfig serverConfig = config.useSingleServer()
                 .setAddress("redis://" + host + ":" + port)
-                .setDatabase(database);
+                .setDatabase(database)
+                // 单实例、小内存部署不需要默认的 64 连接；保留小连接池避免空转占用内存。
+                .setConnectionPoolSize(8)
+                .setConnectionMinimumIdleSize(2)
+                .setSubscriptionConnectionPoolSize(4)
+                .setSubscriptionConnectionMinimumIdleSize(1)
+                .setTimeout(3000);
         if (StringUtils.hasText(password)) {
             serverConfig.setPassword(password);
         }
