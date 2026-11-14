@@ -281,6 +281,7 @@ bash deploy/deploy.sh
 - [前端说明](front/README.md)
 - [部署说明](docs/deploy.md)
 - [阿里云部署说明](docs/deploy-aliyun.md)
+- [生产部署与更新手册](docs/deploy-runbook.md)
 - [环境变量模板](deploy/.env.example)
 
 项目早期参考公开课程项目的工程设计，之后围绕物流异常件取证业务完成领域模型、审核、档案库、团队协作、缓存和部署体系重构。
