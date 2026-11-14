@@ -32,6 +32,12 @@ public class EvidenceEditResponseMessage {
      */
     private String editAction;
 
+    /** 操作后的绝对缩放倍率，用于新加入者直接同步最新状态 */
+    private Double scale;
+
+    /** 操作后的绝对旋转角度 */
+    private Double rotation;
+
     /**
      * 用户信息（脱敏）
      */

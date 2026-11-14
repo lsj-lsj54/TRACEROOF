@@ -127,6 +127,12 @@ mybatis-plus:
       logic-delete-value: 1 # 逻辑已删除值（默认为 1）
       logic-not-delete-value: 0 # 逻辑未删除值（默认为 0）
     enable-sql-runner: true
+# URL 导入安全：仅明确受控的内网测试环境可开启私网访问
+app:
+  upload:
+    url:
+      allow-private-network: ${URL_UPLOAD_ALLOW_PRIVATE_NETWORK:false}
+
 # 接口文档配置
 knife4j:
   enable: ${KNIFE4J_ENABLE:false}

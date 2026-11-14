@@ -89,7 +89,7 @@ cd /root/evidence && chmod 600 deploy/.env
 bash deploy/deploy.sh
 ```
 
-脚本会自动判断：**内存 < 3G 走免 Redis 的低配编排，≥ 3G 走完整版（带 Redis）**。
+脚本会自动判断：**内存 < 3G 走精简资源编排，≥ 3G 走标准资源编排**。两种模式都包含必需的 Redis，区别只是内存配额。
 想强制指定：`DEPLOY_MODE=free bash deploy/deploy.sh`。
 
 它依次做：校验 `.env`（拦住没改的占位密码）→ 校验 Nginx 配置 → 按 git SHA 打镜像标签 → 构建启动 →
@@ -109,7 +109,7 @@ curl -s http://127.0.0.1/config.js | grep __API_BASE__   # 期望看到 '/api'
 ```
 
 > 端口不是 80 的话把上面的 `127.0.0.1` 换成 `127.0.0.1:8080`。
-> 低配模式用的是 `default.no-cache.conf`（不打开缓存开关），所以不用检查 `__USE_CACHE__`。
+> 精简模式也保留 Redis，统一使用 `default.conf`，可检查 `__USE_CACHE__` 是否按需开启。
 > 想确认容器实际加载的配置：`docker compose ... exec front nginx -T | grep sub_filter_types`
 
 浏览器打开 `http://<公网IP>:<端口>/`，能看到影像列表就成功了。
@@ -161,7 +161,7 @@ cd /root/evidence && git pull && bash deploy/deploy.sh
 
 学生的话：学信网认证后可以领 300 元无门槛券。
 
-**配置够不够**：2 核 2G 跑本项目够用（**建议直接上 `docker-compose.free.yml` 免 Redis 编排**，省内存更稳）。要跑完整版（带 Redis）建议 2 核 4G。
+**配置够不够**：2 核 2G 可用 `docker-compose.free.yml` 精简资源编排跑单实例低并发版本。它仍包含必需的 Redis，只是进一步收紧 MySQL、Redis 和 JVM 配额。
 
 ---
 
@@ -229,10 +229,10 @@ cp deploy/.env.example deploy/.env
 vi deploy/.env          # 填 MySQL 密码 + 5 个 COS 参数
 chmod 600 deploy/.env
 
-# 推荐：2核2G 用免 Redis 的低配编排
+# 推荐：2核2G 用精简资源编排（保留必需的 Redis）
 docker compose --env-file deploy/.env -f deploy/docker-compose.free.yml up -d --build
 
-# 或者用一键脚本（会自动健康检查 + 失败回滚，走完整版编排）
+# 或者用一键脚本（自动选择资源档位、健康检查 + 失败回滚）
 bash deploy/deploy.sh
 ```
 
@@ -302,7 +302,7 @@ bash deploy/deploy.sh
 | 证书三个月后网站报错 | 免费证书有效期就是 3 个月 | 加日历提醒，或改用 `acme.sh` 自动续期 |
 | 想升配却发现续费变贵了 | **变配会永久失去续费同价权益** | 动配置前先算清长期成本 |
 | 账单出现额外流量费 | 按流量计费机型 + ECS 往 COS 传图 / 公网下载 | 换固定带宽机型，或把影像迁到 CDN |
-| 2核2G 构建时被 Killed | Maven 构建吃内存 | 加 swap，或改用 `deploy/docker-compose.free.yml` |
+| 2核2G 构建时被 Killed | Maven 构建吃内存 | 加 swap，或在本机/CI 构建镜像后再部署 |
 
 ---
 

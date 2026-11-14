@@ -22,11 +22,10 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import javax.annotation.Resource;
-import java.util.List;
+import java.io.IOException;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * 影像编辑 WebSocket 处理器
@@ -35,7 +34,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * <ul>
  *     <li>维护每张影像的「当前编辑者」与「已连接会话」；</li>
  *     <li>把编辑动作广播给同一张影像的其他在线用户；</li>
- *     <li>记录编辑历史，供中途加入的用户同步到最新状态。</li>
+ *     <li>保存最新绝对视图快照，供中途加入的用户直接同步状态。</li>
  * </ul>
  * 消息进入后不是直接处理，而是丢给 Disruptor 的 RingBuffer 异步消费（见
  * {@link EvidenceEditEventProducer} / {@link EvidenceEditEventWorkHandler}），
@@ -47,6 +46,16 @@ import java.util.concurrent.CopyOnWriteArrayList;
 @Component
 public class EvidenceEditHandler extends TextWebSocketHandler {
 
+    /** 固定数量的分段锁，协调初始快照与实时广播，且不会随影像数增长 */
+    private static final int VIEW_LOCK_STRIPES = 64;
+    private final Object[] viewLocks = new Object[VIEW_LOCK_STRIPES];
+
+    public EvidenceEditHandler() {
+        for (int i = 0; i < VIEW_LOCK_STRIPES; i++) {
+            viewLocks[i] = new Object();
+        }
+    }
+
     /**
      * 每张影像的编辑状态，key: evidenceId, value: 当前正在编辑的用户 ID
      */
@@ -57,11 +66,8 @@ public class EvidenceEditHandler extends TextWebSocketHandler {
      */
     private final Map<Long, Set<WebSocketSession>> evidenceSessions = new ConcurrentHashMap<>();
 
-    /**
-     * 某张影像的编辑记录，key: evidenceId, value: 编辑记录，
-     * 用于某个用户中途加入编辑的时候看到最新的编辑记录
-     */
-    private final Map<Long, List<TextMessage>> evidenceEditRecodes = new ConcurrentHashMap<>();
+    /** 最新绝对视图状态；每张影像只保留一条，不使用会无限增长的增量历史 */
+    private final Map<Long, TextMessage> evidenceViewSnapshots = new ConcurrentHashMap<>();
 
     @Resource
     private UserService userService;
@@ -80,9 +86,16 @@ public class EvidenceEditHandler extends TextWebSocketHandler {
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
         User user = (User) session.getAttributes().get("user");
         Long evidenceId = (Long) session.getAttributes().get("evidenceId");
-        // 保存会话到集合中
-        Set<WebSocketSession> sessionSet = evidenceSessions.computeIfAbsent(evidenceId, k -> ConcurrentHashMap.newKeySet());
-        sessionSet.add(session);
+        // 同一影像的初始快照和实时动作串行化：先给新会话发最新快照，再把它加入广播集合。
+        synchronized (viewLock(evidenceId)) {
+            TextMessage snapshot = evidenceViewSnapshots.get(evidenceId);
+            if (snapshot != null) {
+                sendSafely(session, snapshot);
+            }
+            Set<WebSocketSession> sessionSet = evidenceSessions.computeIfAbsent(evidenceId,
+                    k -> ConcurrentHashMap.newKeySet());
+            sessionSet.add(session);
+        }
 
         // 广播「加入编辑」通知
         EvidenceEditResponseMessage evidenceEditResponseMessage = new EvidenceEditResponseMessage();
@@ -90,19 +103,23 @@ public class EvidenceEditHandler extends TextWebSocketHandler {
         evidenceEditResponseMessage.setMessage(String.format("%s加入编辑", user.getUserName()));
         evidenceEditResponseMessage.setUser(UserVO.entityToVo(user));
         broadcastToEvidence(evidenceId, getTextMessage(evidenceEditResponseMessage));
-
-        // 把历史编辑记录发给新加入的用户，保证其看到最新的编辑结果
-        broadcastToOneUser(evidenceId, evidenceEditRecodes.get(evidenceId), session);
     }
 
     @Override
-    protected void handleTextMessage(WebSocketSession session, TextMessage message) {
+    protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
         // 将消息解析为 EvidenceEditRequestMessage，并交给 Disruptor 异步处理
         EvidenceEditRequestMessage evidenceEditRequestMessage = JSONUtil.toBean(message.getPayload(), EvidenceEditRequestMessage.class);
         Map<String, Object> attributes = session.getAttributes();
         User user = (User) attributes.get("user");
         Long evidenceId = (Long) attributes.get("evidenceId");
-        evidenceEditEventProducer.publishEvent(evidenceEditRequestMessage, session, user, evidenceId);
+        boolean accepted = evidenceEditEventProducer.publishEvent(evidenceEditRequestMessage, session, user, evidenceId);
+        if (!accepted && session.isOpen()) {
+            EvidenceEditResponseMessage response = new EvidenceEditResponseMessage();
+            response.setType(EvidenceEditMessageTypeEnum.ERROR.getValue());
+            response.setMessage("操作过于频繁，请稍后重试");
+            response.setUser(UserVO.entityToVo(user));
+            sendSafely(session, getTextMessage(response));
+        }
     }
 
     @Override
@@ -161,29 +178,46 @@ public class EvidenceEditHandler extends TextWebSocketHandler {
         WebSocketSession session = evidenceEditContext.getSession();
         User user = evidenceEditContext.getUser();
         Long evidenceId = evidenceEditContext.getEvidenceId();
-        Long editingUserId = evidenceEditingUsers.get(evidenceId);
         String editAction = requestMessage.getEditAction();
         EvidenceEditActionEnum actionEnum = EvidenceEditActionEnum.getEnumByValue(editAction);
         if (actionEnum == null) {
             return;
         }
-        // 确认是当前编辑者
-        if (editingUserId != null && editingUserId.equals(user.getId())) {
-            EvidenceEditResponseMessage evidenceEditResponseMessage = new EvidenceEditResponseMessage();
-            evidenceEditResponseMessage.setType(EvidenceEditMessageTypeEnum.EDIT_ACTION.getValue());
-            evidenceEditResponseMessage.setMessage(String.format("%s执行%s", user.getUserName(), actionEnum.getText()));
-            evidenceEditResponseMessage.setEditAction(editAction);
-            evidenceEditResponseMessage.setUser(UserVO.entityToVo(user));
-            // 广播给除了当前客户端之外的其他用户，否则会造成重复编辑
-            broadcastToEvidence(evidenceId, getTextMessage(evidenceEditResponseMessage), session);
-
-            // 记录编辑动作，供中途加入的用户同步
-            EvidenceEditResponseMessage record = new EvidenceEditResponseMessage();
-            record.setType(EvidenceEditMessageTypeEnum.EDIT_ACTION.getValue());
-            record.setEditAction(editAction);
-            List<TextMessage> list = evidenceEditRecodes.computeIfAbsent(evidenceId, k -> new CopyOnWriteArrayList<>());
-            list.add(getTextMessage(record));
+        if (!hasValidSnapshot(requestMessage)) {
+            EvidenceEditResponseMessage error = new EvidenceEditResponseMessage();
+            error.setType(EvidenceEditMessageTypeEnum.ERROR.getValue());
+            error.setMessage("客户端版本过旧或视图状态无效，请刷新页面后重试");
+            error.setUser(UserVO.entityToVo(user));
+            sendSafely(session, getTextMessage(error));
+            return;
         }
+        synchronized (viewLock(evidenceId)) {
+            Long editingUserId = evidenceEditingUsers.get(evidenceId);
+            if (editingUserId == null || !editingUserId.equals(user.getId())) {
+                return;
+            }
+            EvidenceEditResponseMessage response = new EvidenceEditResponseMessage();
+            response.setType(EvidenceEditMessageTypeEnum.EDIT_ACTION.getValue());
+            response.setMessage(String.format("%s执行%s", user.getUserName(), actionEnum.getText()));
+            response.setEditAction(editAction);
+            response.setUser(UserVO.entityToVo(user));
+            response.setScale(requestMessage.getScale());
+            response.setRotation(requestMessage.getRotation());
+            TextMessage snapshot = getTextMessage(response);
+
+            // 先更新快照再广播；新连接在同一个影像锁内只能看到完整的新状态。
+            evidenceViewSnapshots.put(evidenceId, snapshot);
+            broadcastToEvidence(evidenceId, snapshot, session);
+        }
+    }
+
+    /** 新消息必须同时提供有限的绝对缩放与旋转值。 */
+    private boolean hasValidSnapshot(EvidenceEditRequestMessage message) {
+        Double scale = message.getScale();
+        Double rotation = message.getRotation();
+        return scale != null && rotation != null
+                && Double.isFinite(scale) && Double.isFinite(rotation)
+                && scale >= 0.05 && scale <= 20 && Math.abs(rotation) <= 1_000_000;
     }
 
     /**
@@ -223,9 +257,7 @@ public class EvidenceEditHandler extends TextWebSocketHandler {
         evidenceEditResponseMessage.setMessage(String.format("操作失败 %s 正在操作",
                 editUser == null ? "其他用户" : editUser.getUserName()));
         evidenceEditResponseMessage.setUser(UserVO.entityToVo(user));
-        if (sendSession != null && sendSession.isOpen()) {
-            sendSession.sendMessage(getTextMessage(evidenceEditResponseMessage));
-        }
+        sendSafely(sendSession, getTextMessage(evidenceEditResponseMessage));
     }
 
     /**
@@ -239,9 +271,7 @@ public class EvidenceEditHandler extends TextWebSocketHandler {
                 if (excludeSession != null && excludeSession.equals(session)) {
                     continue;
                 }
-                if (session.isOpen()) {
-                    session.sendMessage(textMessage);
-                }
+                sendSafely(session, textMessage);
             }
         }
     }
@@ -253,15 +283,19 @@ public class EvidenceEditHandler extends TextWebSocketHandler {
         broadcastToEvidence(evidenceId, textMessage, null);
     }
 
-    /**
-     * 给指定用户发送历史消息
-     */
-    private void broadcastToOneUser(Long evidenceId, List<TextMessage> textMessages, WebSocketSession sendSession) throws Exception {
-        if (CollUtil.isEmpty(textMessages) || sendSession == null || !sendSession.isOpen()) {
+    private Object viewLock(Long evidenceId) {
+        return viewLocks[Math.floorMod(evidenceId.hashCode(), VIEW_LOCK_STRIPES)];
+    }
+
+    /** 同一 Session 的所有出站消息串行发送，避免容器接收线程与 Disruptor 线程并发写入。 */
+    private void sendSafely(WebSocketSession session, TextMessage message) throws IOException {
+        if (session == null) {
             return;
         }
-        for (TextMessage textMessage : textMessages) {
-            sendSession.sendMessage(textMessage);
+        synchronized (session) {
+            if (session.isOpen()) {
+                session.sendMessage(message);
+            }
         }
     }
 
@@ -276,11 +310,13 @@ public class EvidenceEditHandler extends TextWebSocketHandler {
      * 对应影像没人连接时清理编辑状态，防止内存泄露
      */
     private void cleanupIfNoSession(Long evidenceId) {
-        Set<WebSocketSession> sessionSet = evidenceSessions.get(evidenceId);
-        if (sessionSet == null || sessionSet.isEmpty()) {
-            evidenceSessions.remove(evidenceId);
-            evidenceEditRecodes.remove(evidenceId);
-            evidenceEditingUsers.remove(evidenceId);
+        synchronized (viewLock(evidenceId)) {
+            Set<WebSocketSession> sessionSet = evidenceSessions.get(evidenceId);
+            if (sessionSet == null || sessionSet.isEmpty()) {
+                evidenceSessions.remove(evidenceId);
+                evidenceViewSnapshots.remove(evidenceId);
+                evidenceEditingUsers.remove(evidenceId);
+            }
         }
     }
 

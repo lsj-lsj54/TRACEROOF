@@ -28,13 +28,11 @@
 
 ## 二、先搞清楚：这套项目能省掉什么
 
-### ✅ Redis 可以完全不装（已实测）
+### ❌ Redis 不能省
 
-本项目对 Redis 是**可选依赖**：只有 `/evidence/list/page/vo/cache` 这个带缓存的接口用它，其余接口（含首页列表）都不受影响。
+当前版本的 Redis 不仅用于 `/evidence/list/page/vo/cache`，还承载 Sa-Token 登录会话、Redisson 分布式锁、限流和布隆过滤器。删除 Redis 会导致应用启动、登录或核心操作失败。
 
-实测：把后端的 Redis 指向一个不存在的端口，应用照常启动、列表接口正常返回数据。所以省掉 Redis 只是少了「一层缓存」，功能一点不缺。
-
-这就是 `deploy/docker-compose.free.yml` 存在的意义（它同时也把 MySQL 内存压到了 96M）。
+`deploy/docker-compose.free.yml` 现在表示**精简资源配置**：MySQL 压到 96M、Redis 限到 128M、JVM 堆压到 384M，但仍保留完整依赖。1G 或更小机器应外置 MySQL / Redis，而不是使用所谓“免 Redis”部署。
 
 ### ✅ 前端可以完全白嫖
 
@@ -113,7 +111,7 @@ chmod 600 deploy/.env
 # 12G 内存的机器：直接跑完整版（带 Redis，首页更快）
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --build
 
-# 想省内存 / 不想要 Redis：用免费版编排（MySQL 压到 96M + 无 Redis）
+# 想省内存：用精简资源编排（MySQL 96M + Redis 128M + JVM 384M）
 docker compose --env-file deploy/.env -f deploy/docker-compose.free.yml up -d --build
 ```
 
@@ -163,7 +161,7 @@ Oracle 官方规则：**7 天窗口内，如果 CPU 95 分位 < 20% 且 网络 <
 
 ```js
 window.__API_BASE__ = 'https://api.你的域名/api';
-window.__USE_CACHE__ = false;   // 后端没装 Redis 就保持 false
+window.__USE_CACHE__ = false;   // 可关闭公共列表缓存；登录等核心能力仍需要 Redis
 ```
 
 ### 4.2 跨域：开箱可用，但建议收紧
@@ -252,7 +250,7 @@ jdbc:mysql://<tidb-host>:4000/evidence?useUnicode=true&characterEncoding=utf8&se
 
 ```bash
 # ---------- Oracle / GCP 等自建机器 ----------
-# 低配模式（1~2G 内存，无 Redis）
+# 精简资源模式（2G 内存，保留必需的 Redis）
 docker compose --env-file deploy/.env -f deploy/docker-compose.free.yml up -d --build
 
 # 完整模式（≥2G 内存，带 Redis 缓存）
@@ -272,11 +270,14 @@ bash deploy/backup.sh
 
 ## 十、这份指南里哪些是验证过的
 
-**实测验证过**：
-- Redis 缺失时应用能正常启动、除缓存接口外功能正常（免 Redis 部署可行）
-- 默认跨域配置允许前后端分离部署（`allowedOriginPatterns("*")` + 允许携带 Cookie）
-- 修正后的 `deploy/mysql/init.sql` 能建出与实体完全一致的库表
-- `docker-compose.free.yml` 与 `default.no-cache.conf` 的语法与结构校验通过
+**代码级验证**：
+- 后端测试覆盖 URL 上传、缓存、审核权限、COS 删除和 Spring 上下文
+- 前端冒烟测试覆盖主要模块与页面渲染
+- 修正后的 `deploy/mysql/init.sql` 包含实体需要的基础表
+
+**部署边界**：
+- Redis 是必需依赖，精简编排也会启动 Redis
+- Compose 与 Nginx 的静态检查不能代替真实服务器上的启动和健康检查
 
 **没法替你验证（我没有这些平台的账号，或本机没有 Docker）**：
 - Oracle / GCP / Render 上的真实部署效果

@@ -52,6 +52,9 @@ services:
     image: redis:7-alpine
     container_name: evidence-redis
     restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      TZ: Asia/Shanghai
     # 只在内网暴露，不映射到宿主机，避免被扫到
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}", "--maxmemory", "192mb"]
     volumes:

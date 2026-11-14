@@ -12,6 +12,8 @@ application-local.yml
 deploy/.env
 # 并发测试日志（每次运行自动生成）
 front/test-logs/
+# WorkBuddy 项目记忆与本地工作数据，不进入业务仓库
+.workbuddy/
 
 
 ### STS ###

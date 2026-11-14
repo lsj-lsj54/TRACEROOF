@@ -11,6 +11,7 @@ import com.qcloud.cos.model.ciModel.persistence.OriginalInfo;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -71,11 +72,27 @@ class UrlEvidenceUploadTest {
 
     private final UrlEvidenceUpload urlEvidenceUpload = new UrlEvidenceUpload();
 
+    @BeforeEach
+    void allowLocalTestServer() throws Exception {
+        // 现有测试需要访问本地 HttpServer；生产配置仍默认禁止私网地址。
+        setAllowPrivateNetwork(true);
+    }
+
     @BeforeAll
     static void startServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         // 正常影像
         server.createContext("/good.png", exchange -> respond(exchange, 200, "image/png", TINY_PNG));
+        server.createContext("/redirect.png", exchange -> {
+            exchange.getResponseHeaders().add("Location", "/good.png");
+            exchange.sendResponseHeaders(302, -1);
+            exchange.close();
+        });
+        server.createContext("/redirect-loop.png", exchange -> {
+            exchange.getResponseHeaders().add("Location", "/redirect-loop.png");
+            exchange.sendResponseHeaders(302, -1);
+            exchange.close();
+        });
         // 非影像类型
         server.createContext("/text.txt", exchange ->
                 respond(exchange, 200, "text/plain", "not an image".getBytes(StandardCharsets.UTF_8)));
@@ -196,6 +213,36 @@ class UrlEvidenceUploadTest {
         assertTrue(e.getMessage().contains("HTTP"), e.getMessage());
     }
 
+    @Test
+    @DisplayName("生产默认拒绝回环、私网、链路本地和保留地址")
+    void privateAndReservedAddressesShouldFail() throws Exception {
+        setAllowPrivateNetwork(false);
+        String[] blockedUrls = {
+                baseUrl + "/good.png",
+                "http://10.0.0.1/a.png",
+                "http://192.168.1.1/a.png",
+                "http://169.254.169.254/latest/meta-data",
+                "http://100.64.0.1/a.png",
+                "http://192.0.2.1/a.png",
+                "http://[::1]/a.png",
+                "http://[fc00::1]/a.png",
+        };
+        for (String blockedUrl : blockedUrls) {
+            BusinessException e = assertThrows(BusinessException.class,
+                    () -> urlEvidenceUpload.validEvidence(blockedUrl), blockedUrl);
+            assertTrue(e.getMessage().contains("不允许访问"), blockedUrl + " -> " + e.getMessage());
+        }
+    }
+
+    @Test
+    @DisplayName("URL 中不允许携带账号密码")
+    void userInfoShouldFail() throws Exception {
+        setAllowPrivateNetwork(false);
+        BusinessException e = assertThrows(BusinessException.class,
+                () -> urlEvidenceUpload.validEvidence("http://user:pass@127.0.0.1/a.png"));
+        assertTrue(e.getMessage().contains("账号或密码"), e.getMessage());
+    }
+
     /* ------------------------------ 类型与体积校验 ------------------------------ */
 
     @Test
@@ -243,6 +290,20 @@ class UrlEvidenceUploadTest {
     @DisplayName("站点不支持 HEAD 时不应阻塞上传")
     void headNotAllowedShouldPass() {
         assertDoesNotThrow(() -> urlEvidenceUpload.validEvidence(baseUrl + "/no-head.png"));
+    }
+
+    @Test
+    @DisplayName("允许经过校验的相对重定向")
+    void safeRedirectShouldPass() {
+        assertDoesNotThrow(() -> urlEvidenceUpload.validEvidence(baseUrl + "/redirect.png"));
+    }
+
+    @Test
+    @DisplayName("重定向循环应被次数上限拦截")
+    void redirectLoopShouldFail() {
+        BusinessException e = assertThrows(BusinessException.class,
+                () -> urlEvidenceUpload.validEvidence(baseUrl + "/redirect-loop.png"));
+        assertTrue(e.getMessage().contains("重定向次数过多"), e.getMessage());
     }
 
     /* ------------------------------ 文件名解析 ------------------------------ */
@@ -399,6 +460,12 @@ class UrlEvidenceUploadTest {
             out.write(bytes);
         }
         return file;
+    }
+
+    private void setAllowPrivateNetwork(boolean value) throws Exception {
+        java.lang.reflect.Field field = UrlEvidenceUpload.class.getDeclaredField("allowPrivateNetwork");
+        field.setAccessible(true);
+        field.setBoolean(urlEvidenceUpload, value);
     }
 
     private void setField(Object target, String name, Object value) throws Exception {

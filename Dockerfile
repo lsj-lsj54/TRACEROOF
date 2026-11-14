@@ -30,8 +30,8 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 COPY --from=build /build/target/*.jar app.jar
 
-# JVM 参数：容器内按比例分配堆，2G 内存的机器也能跑得比较稳
-ENV JAVA_OPTS="-XX:MaxRAMPercentage=70 -XX:+UseG1GC -Dfile.encoding=UTF-8"
+# JVM 默认采用小内存基线；Compose 可继续覆盖 JAVA_OPTS
+ENV JAVA_OPTS="-Xms128m -Xmx512m -XX:MaxMetaspaceSize=256m -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8"
 
 EXPOSE 8666
 

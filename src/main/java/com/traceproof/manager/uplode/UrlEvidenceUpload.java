@@ -1,26 +1,38 @@
 package com.traceproof.manager.uplode;
 
 import cn.hutool.core.io.FileUtil;
-import cn.hutool.core.util.RandomUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.core.util.URLUtil;
-import cn.hutool.http.HttpRequest;
-import cn.hutool.http.HttpResponse;
-import cn.hutool.http.HttpStatus;
 import com.traceproof.exception.BusinessException;
 import com.traceproof.exception.ErrorCode;
 import com.traceproof.exception.ThrowUtils;
 import com.traceproof.model.enums.FileUploadEnum;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.http.Header;
+import org.apache.http.HttpStatus;
+import org.apache.http.client.config.CookieSpecs;
+import org.apache.http.client.config.RequestConfig;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpHead;
+import org.apache.http.client.methods.HttpUriRequest;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PreDestroy;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.IDN;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.net.URL;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * URL 上传
@@ -38,6 +50,31 @@ public class UrlEvidenceUpload extends EvidenceUploadTemplate {
 
     /** 下载失败后的重试次数（0 表示不重试） */
     private static final int DOWNLOAD_RETRY_TIMES = 1;
+
+    /** 最多跟随 3 次重定向，每一次都重新做 SSRF 校验 */
+    private static final int MAX_REDIRECT_TIMES = 3;
+
+    /** 仅测试或明确受控的内网环境允许开启；生产默认禁止访问私网地址 */
+    @Value("${app.upload.url.allow-private-network:false}")
+    private boolean allowPrivateNetwork;
+
+    /**
+     * DNS 解析器同时负责安全校验和返回实际连接地址，避免校验后再次发生 DNS rebinding。
+     * 连接池保持小规格，重定向由业务层逐级校验，不自动跟随。
+     */
+    private final CloseableHttpClient httpClient = HttpClients.custom()
+            .setDnsResolver(this::resolveAllowedAddresses)
+            .setMaxConnTotal(8)
+            .setMaxConnPerRoute(4)
+            .disableAutomaticRetries()
+            .setDefaultRequestConfig(RequestConfig.custom()
+                    .setConnectTimeout(5000)
+                    .setConnectionRequestTimeout(2000)
+                    .setSocketTimeout(TIMEOUT_MILLIS)
+                    .setRedirectsEnabled(false)
+                    .setCookieSpec(CookieSpecs.IGNORE_COOKIES)
+                    .build())
+            .build();
 
     /** 无法从 URL 解析出合法文件名时的兜底名，避免 File.createTempFile 前缀过短报错 */
     private static final String FALLBACK_FILENAME = "evidence.jpg";
@@ -65,16 +102,8 @@ public class UrlEvidenceUpload extends EvidenceUploadTemplate {
     protected void validEvidence(Object inputSource) {
         String fileUrl = cast(inputSource);
 
-        // 1. 校验 URL 格式与协议
-        try {
-            URL url = new URL(fileUrl);
-            ThrowUtils.throwIf(!Arrays.asList("http", "https").contains(url.getProtocol().toLowerCase()),
-                    ErrorCode.PARAMS_ERROR, "仅支持 HTTP 或 HTTPS 协议的文件地址");
-        } catch (BusinessException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件地址格式不正确");
-        }
+        // 1. 校验 URL 格式、协议与实际解析地址，拦截 SSRF
+        validateRemoteUrl(fileUrl);
 
         // 2. URL 自带「真后缀」时先按后缀拦一道，省掉一次网络请求。
         //    后缀不在常见影像后缀里的（CDN 加密串、无后缀）不能在这里判死，
@@ -87,16 +116,17 @@ public class UrlEvidenceUpload extends EvidenceUploadTemplate {
         }
 
         // 3. HEAD 探测类型与体积
-        HttpResponse response = null;
+        CloseableHttpResponse response = null;
         try {
-            response = HttpRequest.head(fileUrl).timeout(TIMEOUT_MILLIS).execute();
+            response = executeWithRedirects(fileUrl, true);
             // 部分站点不支持 HEAD，拿不到信息就交给下载后的校验兜底，不在这里直接失败
-            if (response.getStatus() != HttpStatus.HTTP_OK) {
-                log.warn("HEAD 探测未返回 200，状态码 = {}，地址 = {}", response.getStatus(), fileUrl);
+            int status = response.getStatusLine().getStatusCode();
+            if (status != HttpStatus.SC_OK) {
+                log.warn("HEAD 探测未返回 200，状态码 = {}，地址 = {}", status, fileUrl);
                 return;
             }
-            validContentType(response.header("Content-Type"));
-            String contentLength = response.header("Content-Length");
+            validContentType(header(response, "Content-Type"));
+            String contentLength = header(response, "Content-Length");
             if (StrUtil.isNotBlank(contentLength)) {
                 try {
                     validFileSize(Long.parseLong(contentLength.trim()));
@@ -110,7 +140,11 @@ public class UrlEvidenceUpload extends EvidenceUploadTemplate {
             log.warn("HEAD 探测失败，将直接尝试下载，地址 = {}，原因 = {}", fileUrl, e.getMessage());
         } finally {
             if (response != null) {
-                response.close();
+                try {
+                    response.close();
+                } catch (IOException e) {
+                    log.debug("关闭 HEAD 响应失败：{}", e.getMessage());
+                }
             }
         }
     }
@@ -214,24 +248,195 @@ public class UrlEvidenceUpload extends EvidenceUploadTemplate {
     protected void processFile(Object inputSource, File file) throws Exception {
         String fileUrl = cast(inputSource);
         for (int attempt = 0; ; attempt++) {
-            HttpResponse response = null;
+            CloseableHttpResponse response = null;
             try {
-                response = HttpRequest.get(fileUrl).timeout(TIMEOUT_MILLIS).execute();
-                if (response.isOk()) {
+                response = executeWithRedirects(fileUrl, false);
+                int status = response.getStatusLine().getStatusCode();
+                if (status == HttpStatus.SC_OK && response.getEntity() != null) {
                     // 边下边校验体积，不能只信任 Content-Length（可能缺省或造假）
-                    downloadToFile(response.bodyStream(), file, MAX_FILE_SIZE);
+                    downloadToFile(response.getEntity().getContent(), file, MAX_FILE_SIZE);
                     return;
                 }
                 if (attempt >= DOWNLOAD_RETRY_TIMES) {
                     throw new BusinessException(ErrorCode.OPERATION_ERROR,
-                            "下载影像失败，状态码 " + response.getStatus());
+                            "下载影像失败，状态码 " + status);
                 }
-                log.warn("下载影像返回 {}，重试一次，地址 = {}", response.getStatus(), fileUrl);
+                log.warn("下载影像返回 {}，重试一次，地址 = {}", status, fileUrl);
             } finally {
                 if (response != null) {
                     response.close();
                 }
             }
+        }
+    }
+
+    /**
+     * 执行 HEAD/GET 并手工处理重定向。
+     * 不使用客户端自动跳转，否则公网地址可以跳到 127.0.0.1 或云元数据地址。
+     */
+    private CloseableHttpResponse executeWithRedirects(String initialUrl, boolean head) throws IOException {
+        String currentUrl = initialUrl;
+        for (int redirectCount = 0; ; redirectCount++) {
+            validateRemoteUrl(currentUrl);
+            HttpUriRequest request = head ? new HttpHead(currentUrl) : new HttpGet(currentUrl);
+            CloseableHttpResponse response = httpClient.execute(request);
+            int status = response.getStatusLine().getStatusCode();
+            boolean redirect = status == HttpStatus.SC_MOVED_PERMANENTLY
+                    || status == HttpStatus.SC_MOVED_TEMPORARILY
+                    || status == HttpStatus.SC_SEE_OTHER
+                    || status == HttpStatus.SC_TEMPORARY_REDIRECT
+                    || status == 308;
+            String location = header(response, "Location");
+            if (!redirect || StrUtil.isBlank(location)) {
+                return response;
+            }
+            if (redirectCount >= MAX_REDIRECT_TIMES) {
+                response.close();
+                throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件地址重定向次数过多");
+            }
+            try {
+                currentUrl = new URL(new URL(currentUrl), location).toExternalForm();
+            } catch (Exception e) {
+                throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件重定向地址格式不正确");
+            } finally {
+                response.close();
+            }
+        }
+    }
+
+    private static String header(CloseableHttpResponse response, String name) {
+        Header header = response.getFirstHeader(name);
+        return header == null ? null : header.getValue();
+    }
+
+    /** 校验协议、用户信息、主机名和全部 DNS 解析结果。 */
+    private void validateRemoteUrl(String fileUrl) {
+        try {
+            URL url = new URL(fileUrl);
+            String protocol = url.getProtocol().toLowerCase(Locale.ROOT);
+            ThrowUtils.throwIf(!Arrays.asList("http", "https").contains(protocol),
+                    ErrorCode.PARAMS_ERROR, "仅支持 HTTP 或 HTTPS 协议的文件地址");
+            ThrowUtils.throwIf(StrUtil.isBlank(url.getHost()),
+                    ErrorCode.PARAMS_ERROR, "文件地址缺少有效主机名");
+            ThrowUtils.throwIf(StrUtil.isNotBlank(url.getUserInfo()),
+                    ErrorCode.PARAMS_ERROR, "文件地址不允许携带账号或密码");
+            if (allowPrivateNetwork) {
+                return;
+            }
+            resolveAllowedAddresses(url.getHost());
+        } catch (BusinessException e) {
+            throw e;
+        } catch (UnknownHostException e) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件地址无法解析");
+        } catch (Exception e) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件地址格式不正确");
+        }
+    }
+
+    /**
+     * Apache HttpClient 建连时调用这里，返回的地址会直接用于实际 socket 连接。
+     * 即使攻击者在两次 DNS 查询之间切换记录，也只能连接到本次通过校验的地址。
+     */
+    private InetAddress[] resolveAllowedAddresses(String host) throws UnknownHostException {
+        String asciiHost = IDN.toASCII(host);
+        InetAddress[] addresses = InetAddress.getAllByName(asciiHost);
+        if (addresses.length == 0) {
+            throw new UnknownHostException(host);
+        }
+        if (!allowPrivateNetwork) {
+            for (InetAddress address : addresses) {
+                ThrowUtils.throwIf(isBlockedAddress(address),
+                        ErrorCode.PARAMS_ERROR, "文件地址不允许访问内网、回环或保留地址");
+            }
+        }
+        return addresses;
+    }
+
+    /** 判断是否属于不应由公网导入功能访问的地址。 */
+    private static boolean isBlockedAddress(InetAddress address) {
+        if (address.isAnyLocalAddress() || address.isLoopbackAddress()
+                || address.isLinkLocalAddress() || address.isSiteLocalAddress()
+                || address.isMulticastAddress()) {
+            return true;
+        }
+        byte[] bytes = address.getAddress();
+        if (bytes.length == 4) {
+            return isBlockedIpv4(bytes, 0);
+        }
+        if (bytes.length != 16) {
+            return true;
+        }
+        // IPv6 唯一本地地址 fc00::/7
+        if ((unsigned(bytes[0]) & 0xFE) == 0xFC) {
+            return true;
+        }
+        // IPv4-mapped IPv6：::ffff:a.b.c.d
+        boolean mapped = true;
+        for (int i = 0; i < 10; i++) {
+            mapped &= bytes[i] == 0;
+        }
+        mapped &= unsigned(bytes[10]) == 0xFF && unsigned(bytes[11]) == 0xFF;
+        if (mapped) {
+            return isBlockedIpv4(bytes, 12);
+        }
+        // NAT64：64:ff9b::/96，内嵌 IPv4 仍需按 IPv4 规则检查。
+        if (unsigned(bytes[0]) == 0x00 && unsigned(bytes[1]) == 0x64
+                && unsigned(bytes[2]) == 0xFF && unsigned(bytes[3]) == 0x9B) {
+            boolean nat64 = true;
+            for (int i = 4; i < 12; i++) {
+                nat64 &= bytes[i] == 0;
+            }
+            return nat64 && isBlockedIpv4(bytes, 12);
+        }
+        // 6to4：2002::/16，内嵌 IPv4 位于第 3~6 字节。
+        if (unsigned(bytes[0]) == 0x20 && unsigned(bytes[1]) == 0x02) {
+            return isBlockedIpv4(bytes, 2);
+        }
+        return false;
+    }
+
+    /** IPv4 特殊网段；除常见私网外，也覆盖 CGNAT、基准测试、文档和保留地址。 */
+    private static boolean isBlockedIpv4(byte[] bytes, int offset) {
+        int first = unsigned(bytes[offset]);
+        int second = unsigned(bytes[offset + 1]);
+        int third = unsigned(bytes[offset + 2]);
+        if (first == 0 || first == 10 || first == 127 || first >= 224) {
+            return true;
+        }
+        if (first == 100 && second >= 64 && second <= 127) {
+            return true;
+        }
+        if (first == 169 && second == 254) {
+            return true;
+        }
+        if (first == 172 && second >= 16 && second <= 31) {
+            return true;
+        }
+        if (first == 192 && second == 168) {
+            return true;
+        }
+        if (first == 192 && second == 0 && (third == 0 || third == 2)) {
+            return true;
+        }
+        if (first == 198 && (second == 18 || second == 19)) {
+            return true;
+        }
+        if (first == 198 && second == 51 && third == 100) {
+            return true;
+        }
+        return first == 203 && second == 0 && third == 113;
+    }
+
+    private static int unsigned(byte value) {
+        return value & 0xFF;
+    }
+
+    @PreDestroy
+    public void closeHttpClient() {
+        try {
+            httpClient.close();
+        } catch (IOException e) {
+            log.warn("关闭 URL 上传 HTTP 客户端失败：{}", e.getMessage());
         }
     }
 

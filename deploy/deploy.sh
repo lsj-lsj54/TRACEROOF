@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="$SCRIPT_DIR/.env"
 
-# 部署模式：full（MySQL + Redis + 后端 + 前端）/ free（免 Redis 的低配编排，适合 1~2G 小机器）
+# 部署模式：full（标准资源配置）/ free（精简资源配置，仍包含必需的 Redis）
 # 可用环境变量显式指定：DEPLOY_MODE=free bash deploy/deploy.sh
 # 不指定时按机器内存自动判断（小于 3G 走 free）。
 DEPLOY_MODE="${DEPLOY_MODE:-auto}"
@@ -44,8 +44,8 @@ fi
 case "$DEPLOY_MODE" in
   free)
     COMPOSE_FILE="$SCRIPT_DIR/docker-compose.free.yml"
-    # 低配编排没有 Redis，前端必须用不打开缓存开关的 Nginx 配置
-    NGINX_CONF="$SCRIPT_DIR/nginx/default.no-cache.conf"
+    # 精简编排仍保留 Redis，公共列表缓存可以正常使用
+    NGINX_CONF="$SCRIPT_DIR/nginx/default.conf"
     ;;
   full)
     COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
@@ -65,8 +65,8 @@ log "部署模式：$DEPLOY_MODE（编排 $(basename "$COMPOSE_FILE")，Nginx $(
 if [ "$DEPLOY_MODE" = "full" ]; then
   MEM_MB="$(detect_total_mem_mb)"
   if [ "${MEM_MB:-0}" -gt 0 ] && [ "${MEM_MB:-0}" -lt 3000 ]; then
-    warn "机器只有约 ${MEM_MB}MB 内存，跑完整版（含 Redis）可能吃紧；"
-    warn "建议改用低配模式：DEPLOY_MODE=free bash deploy/deploy.sh"
+    warn "机器只有约 ${MEM_MB}MB 内存，标准资源配置可能吃紧；"
+    warn "可改用精简资源配置：DEPLOY_MODE=free bash deploy/deploy.sh（仍包含必需的 Redis）"
   fi
 fi
 
@@ -111,7 +111,7 @@ docker run --rm --add-host app:127.0.0.1 \
 
 # --------------------------------------------------------------- 4. 构建启动
 log "构建并启动（tag=$TAG，端口=$HTTP_PORT）"
-PICTURE_TAG="$TAG" compose up -d --build || die "构建或启动失败，执行 deploy.sh 前请确认 Docker 守护进程正常"
+EVIDENCE_TAG="$TAG" compose up -d --build || die "构建或启动失败，执行 deploy.sh 前请确认 Docker 守护进程正常"
 
 # ------------------------------------------------------------- 5. 健康门禁
 # 后端 /api/user/get/login 未登录时会返回 {"code":40100,...}，能拿到 JSON 就说明应用已就绪
@@ -152,7 +152,7 @@ log "开始回滚到 $PREV_IMAGE"
 # 保留现场：把这次构建出来的镜像另存一个 tag，方便事后分析
 docker tag "evidence-app:$TAG" "evidence-app:$TAG.failed" 2>/dev/null || true
 docker tag "$PREV_IMAGE" "evidence-app:$TAG"
-PICTURE_TAG="$TAG" compose up -d app
+EVIDENCE_TAG="$TAG" compose up -d app
 
 if wait_healthy; then
   die "已回滚到 $PREV_IMAGE 并恢复服务；可疑镜像保留为 evidence-app:$TAG.failed，请据此排查"

@@ -26,4 +26,10 @@ public class EvidenceEditRequestMessage {
      * 执行的编辑动作，例如 "ZOOM_IN", "ROTATE_RIGHT"，见 {@code EvidenceEditActionEnum}
      */
     private String editAction;
+
+    /** 操作后的绝对缩放倍率；与老客户端的增量动作兼容 */
+    private Double scale;
+
+    /** 操作后的绝对旋转角度 */
+    private Double rotation;
 }

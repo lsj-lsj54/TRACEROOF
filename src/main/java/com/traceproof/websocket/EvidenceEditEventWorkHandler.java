@@ -76,13 +76,17 @@ public class EvidenceEditEventWorkHandler implements WorkHandler<EvidenceEditEve
      * 向客户端发送错误消息
      */
     private void sendErrorMessage(WebSocketSession session, User user, String message) throws Exception {
-        if (session == null || !session.isOpen()) {
+        if (session == null) {
             return;
         }
         EvidenceEditResponseMessage evidenceEditResponseMessage = new EvidenceEditResponseMessage();
         evidenceEditResponseMessage.setType(EvidenceEditMessageTypeEnum.ERROR.getValue());
         evidenceEditResponseMessage.setMessage(message);
         evidenceEditResponseMessage.setUser(UserVO.entityToVo(user));
-        session.sendMessage(new TextMessage(objectMapper.writeValueAsString(evidenceEditResponseMessage)));
+        synchronized (session) {
+            if (session.isOpen()) {
+                session.sendMessage(new TextMessage(objectMapper.writeValueAsString(evidenceEditResponseMessage)));
+            }
+        }
     }
 }

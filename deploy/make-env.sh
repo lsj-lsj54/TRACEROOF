@@ -74,8 +74,7 @@ MYSQL_USERNAME=root
 MYSQL_PASSWORD=$MYSQL_PW
 
 # ---------- Redis ----------
-# 用 deploy/docker-compose.free.yml（免 Redis 低配编排）时这个值用不到，
-# 但保留着，方便以后加到 4G 内存再切回完整版。
+# 标准与精简编排都需要 Redis：登录会话、锁、限流和缓存共用此密码。
 REDIS_PASSWORD=$REDIS_PW
 
 # ---------- 腾讯云 COS（取自 application-local.yml）----------

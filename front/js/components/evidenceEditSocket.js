@@ -119,11 +119,17 @@ export class EvidenceEditSocketClient {
   }
 
   /**
-   * 执行编辑动作并广播给其他用户
+   * 执行编辑动作并广播给其他用户，同时携带绝对状态供新加入者同步。
    * @param {string} action EDIT_ACTION 里的一个值
+   * @param {object} view 当前缩放与旋转状态
    */
-  sendAction(action) {
-    this._send({ type: EDIT_MESSAGE_TYPE.EDIT_ACTION, editAction: action });
+  sendAction(action, view = {}) {
+    this._send({
+      type: EDIT_MESSAGE_TYPE.EDIT_ACTION,
+      editAction: action,
+      scale: view.scale,
+      rotation: view.rotation,
+    });
   }
 
   /** 关闭连接（会自动触发 onclose） */

@@ -79,8 +79,17 @@ export function openCoEdit(evidence) {
     img.style.transform = `scale(${view.scale}) rotate(${view.rotation}deg)`;
   }
 
-  /** 应用一个编辑动作 */
-  function applyAction(action) {
+  /** 应用一个编辑动作；有绝对状态时直接同步，避免增量重放产生偏差 */
+  function applyAction(action, scale, rotation) {
+    const hasSnapshot = scale !== null && scale !== undefined
+      && rotation !== null && rotation !== undefined
+      && Number.isFinite(Number(scale)) && Number.isFinite(Number(rotation));
+    if (hasSnapshot) {
+      view.scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, Number(scale)));
+      view.rotation = Number(rotation);
+      renderTransform();
+      return;
+    }
     switch (action) {
       case EDIT_ACTION.ZOOM_IN:
         view.scale = Math.min(MAX_SCALE, view.scale * ZOOM_STEP);
@@ -138,7 +147,7 @@ export function openCoEdit(evidence) {
       case 'EDIT_ACTION':
         // 服务端广播时已排除发送者，自己不会收到自己的动作，不会重复应用
         if (msg.editAction) {
-          applyAction(msg.editAction);
+          applyAction(msg.editAction, msg.scale, msg.rotation);
         }
         break;
       default:
@@ -178,7 +187,7 @@ export function openCoEdit(evidence) {
       }
       const action = btn.dataset.coaction;
       applyAction(action);
-      client.sendAction(action);
+      client.sendAction(action, { scale: view.scale, rotation: view.rotation });
     });
   });
 
