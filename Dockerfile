@@ -7,9 +7,10 @@
 FROM maven:3.8.8-eclipse-temurin-17 AS build
 WORKDIR /build
 
-# 先只拷 pom，利用镜像层缓存把依赖提前拉下来，改代码时不用重下
+# 先只拷 pom 和 Maven 镜像配置，利用镜像层缓存把依赖提前拉下来，改代码时不用重下
 COPY pom.xml .
-RUN mvn -B dependency:go-offline -DskipTests || true
+COPY deploy/maven-settings.xml /build/settings.xml
+RUN mvn -B -s /build/settings.xml dependency:go-offline -DskipTests || true
 
 COPY src ./src
 
@@ -18,7 +19,7 @@ COPY src ./src
 # 生产环境的配置一律走环境变量注入（见 deploy/docker-compose.yml）。
 RUN rm -f src/main/resources/application-local.yml
 
-RUN mvn -B clean package -DskipTests
+RUN mvn -B -s /build/settings.xml clean package -DskipTests
 
 # ---------- 运行阶段 ----------
 FROM eclipse-temurin:17-jre-jammy
